@@ -1,0 +1,12 @@
+/build/
+*.o
+*.a
+*.dylib
+*.so
+.DS_Store
+*.sqlite
+*.sqlite-*
+/data/local/
+.env
+.vscode/
+.idea/
