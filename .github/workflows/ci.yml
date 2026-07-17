@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install C dependencies
+        run: sudo apt-get update && sudo apt-get install -y libcjson-dev libwebsockets-dev pkg-config
       - name: Build
-        run: make
-      - name: Smoke binary
-        run: ./build/hollow-grid-c --help
+        run: make check
