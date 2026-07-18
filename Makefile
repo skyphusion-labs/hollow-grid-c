@@ -9,9 +9,17 @@ DEPS := libwebsockets libcjson openssl
 CPPFLAGS += $(shell $(PKG_CONFIG) --cflags $(DEPS))
 LDLIBS += $(shell $(PKG_CONFIG) --libs $(DEPS))
 
+# COVERAGE=1 builds instrumented objects for gcov/gcovr.
+ifeq ($(COVERAGE),1)
+CFLAGS += -O0 -g --coverage
+LDFLAGS += --coverage
+endif
+
 BUILD := build
+OBJ := $(BUILD)/obj
 BIN := $(BUILD)/hollow-grid-c
 TEST_BIN := $(BUILD)/test-core
+
 SRC := \
 	src/main.c \
 	src/event/event.c \
@@ -26,18 +34,25 @@ TEST_SRC := \
 	src/world/items.c \
 	src/world/world.c
 
+OBJS := $(SRC:%=$(OBJ)/%.o)
+TEST_OBJS := $(TEST_SRC:%=$(OBJ)/%.o)
+
 .PHONY: all clean check test
 
 all: $(BIN)
 
-$(BUILD):
-	mkdir -p $(BUILD)
+$(OBJ)/%.c.o: %.c | $(OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
 
-$(BIN): $(SRC) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(SRC) $(LDFLAGS) $(LDLIBS)
+$(BIN): $(OBJS) | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS)
 
-$(TEST_BIN): $(TEST_SRC) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(TEST_SRC) $(LDFLAGS) $(LDLIBS)
+$(TEST_BIN): $(TEST_OBJS) | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ $(TEST_OBJS) $(LDFLAGS) $(LDLIBS)
+
+$(BUILD) $(OBJ):
+	mkdir -p $@
 
 test: $(TEST_BIN)
 	./$(TEST_BIN)

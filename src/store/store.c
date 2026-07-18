@@ -1,12 +1,16 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "hg_store.h"
 
 #include <cjson/cJSON.h>
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 static int make_dir(const char *path) {
   if (mkdir(path, 0755) == 0 || errno == EEXIST) {
@@ -118,8 +122,8 @@ int hg_character_remove_item(hg_character *character, const char *item_id) {
   for (size_t i = 0; i < character->inventory_count; ++i) {
     if (strcmp(character->inventory[i], item_id) == 0) {
       for (size_t j = i + 1; j < character->inventory_count; ++j) {
-        snprintf(character->inventory[j - 1], sizeof(character->inventory[0]),
-                 "%s", character->inventory[j]);
+        memmove(character->inventory[j - 1], character->inventory[j],
+                sizeof(character->inventory[0]));
       }
       character->inventory_count--;
       memset(character->inventory[character->inventory_count], 0,
@@ -246,8 +250,15 @@ int hg_store_save(const hg_store *store, const hg_character *character) {
     return -1;
   }
 
-  FILE *file = fopen(temp_path, "wb");
+  int fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  if (fd < 0) {
+    free(json);
+    return -1;
+  }
+  FILE *file = fdopen(fd, "wb");
   if (file == NULL) {
+    close(fd);
+    remove(temp_path);
     free(json);
     return -1;
   }
