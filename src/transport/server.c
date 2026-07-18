@@ -1,6 +1,7 @@
 #include "hg_server.h"
 
 #include "hg_event.h"
+#include "hg_grid.h"
 #include "hg_items.h"
 #include "hg_store.h"
 #include "hg_world.h"
@@ -170,6 +171,7 @@ typedef struct {
   hg_world_info worlds[HG_MAX_WORLDS];
   size_t world_count;
   time_t last_fed_poll;
+  hg_grid *remote;
 } hg_server;
 
 static const char *k_refugee_names[] = {
@@ -200,6 +202,9 @@ static int find_inventory(const hg_character *character, const char *arg,
                           char *out_id, size_t out_size);
 static void seed_worlds(hg_server *server);
 static void poll_gridcasts(hg_server *server);
+static const char *player_regard(const hg_character *character);
+static void merge_hub_on_login(hg_server *server, hg_character *character);
+static void commit_hub(hg_server *server, const hg_character *character);
 
 static void free_messages(hg_session *session) {
   while (session->out_head != NULL) {
@@ -313,12 +318,89 @@ static void seed_worlds(hg_server *server) {
   server->world_count++;
 }
 
+static void deliver_gridcast(hg_server *server, const char *world,
+                             const char *sender, const char *text) {
+  cJSON *payload = json_object();
+  cJSON_AddStringToObject(payload, "world", world);
+  cJSON_AddStringToObject(payload, "from", sender);
+  cJSON_AddStringToObject(payload, "text", text);
+  char *event_line = hg_event_line("comm.gridcast", payload);
+  for (hg_session *other = server->sessions; other != NULL;
+       other = other->next) {
+    if (other->state != HG_PLAYING) {
+      continue;
+    }
+    queue_text(other, "[Grid] [%s] %s: %s", world, sender, text);
+    if (event_line != NULL) {
+      size_t len = strlen(event_line);
+      char *copy = malloc(len + 1);
+      if (copy != NULL) {
+        memcpy(copy, event_line, len + 1);
+        queue_owned(other, copy);
+      }
+    }
+  }
+  free(event_line);
+}
+
+static void report_presence(hg_server *server) {
+  if (server->remote == NULL || server->sessions == NULL) {
+    return;
+  }
+  hg_grid_presence entries[64];
+  size_t n = 0;
+  for (hg_session *s = server->sessions; s != NULL && n < 64; s = s->next) {
+    if (s->state != HG_PLAYING) {
+      continue;
+    }
+    snprintf(entries[n].name, sizeof(entries[n].name), "%s",
+             s->character.name);
+    snprintf(entries[n].regard, sizeof(entries[n].regard), "%s",
+             player_regard(&s->character));
+    snprintf(entries[n].title, sizeof(entries[n].title), "%s",
+             s->character.title);
+    entries[n].world[0] = '\0';
+    entries[n].at_ms = 0;
+    n++;
+  }
+  if (n == 0) {
+    return;
+  }
+  long long at = (long long)time(NULL) * 1000;
+  (void)hg_grid_report_presence(server->remote, server->config->world_name,
+                                entries, n, at);
+}
+
 static void poll_gridcasts(hg_server *server) {
   time_t now = time(NULL);
   if (server->last_fed_poll != 0 && now - server->last_fed_poll < 2) {
     return;
   }
   server->last_fed_poll = now;
+
+  if (server->remote != NULL) {
+    hg_grid_cast casts[20];
+    size_t count = 0;
+    if (hg_grid_casts_since(server->remote, server->last_cast_id, 20, casts,
+                            20, &count) != 0) {
+      return;
+    }
+    int max_id = server->last_cast_id;
+    for (size_t i = 0; i < count; ++i) {
+      if (casts[i].id > max_id) {
+        max_id = casts[i].id;
+      }
+      deliver_gridcast(server, casts[i].world, casts[i].sender, casts[i].text);
+    }
+    server->last_cast_id = max_id;
+    report_presence(server);
+    int tide = 0;
+    if (hg_grid_tide(server->remote, &tide) == 0) {
+      server->tide = tide;
+    }
+    return;
+  }
+
   int max_id = server->last_cast_id;
   for (size_t i = 0; i < server->cast_count; ++i) {
     const hg_cast *cast = &server->casts[i];
@@ -328,28 +410,7 @@ static void poll_gridcasts(hg_server *server) {
     if (cast->id > max_id) {
       max_id = cast->id;
     }
-    cJSON *payload = json_object();
-    cJSON_AddStringToObject(payload, "world", cast->world);
-    cJSON_AddStringToObject(payload, "from", cast->sender);
-    cJSON_AddStringToObject(payload, "text", cast->text);
-    char *event_line = hg_event_line("comm.gridcast", payload);
-    for (hg_session *other = server->sessions; other != NULL;
-         other = other->next) {
-      if (other->state != HG_PLAYING) {
-        continue;
-      }
-      queue_text(other, "[Grid] [%s] %s: %s", cast->world, cast->sender,
-                 cast->text);
-      if (event_line != NULL) {
-        size_t len = strlen(event_line);
-        char *copy = malloc(len + 1);
-        if (copy != NULL) {
-          memcpy(copy, event_line, len + 1);
-          queue_owned(other, copy);
-        }
-      }
-    }
-    free(event_line);
+    deliver_gridcast(server, cast->world, cast->sender, cast->text);
   }
   server->last_cast_id = max_id;
 }
@@ -972,6 +1033,7 @@ static void finish_login(hg_session *session, hg_server *server, int resumed) {
     snprintf(session->character.position, sizeof(session->character.position),
              "standing");
   }
+  merge_hub_on_login(server, &session->character);
   queue_text(session,
              resumed ? "The Grid finds your old charge, %s."
                      : "The field takes your measure, %s. Type help for verbs.",
@@ -1126,6 +1188,11 @@ static void combat_round(hg_session *session, hg_server *server) {
              death_room);
     server->fallen[0].at = time(NULL);
     server->fallen_count++;
+    if (server->remote != NULL) {
+      (void)hg_grid_record_fallen(server->remote, server->config->world_name,
+                                  session->character.name, death_room,
+                                  (long long)server->fallen[0].at * 1000);
+    }
 
     session->character.hp = session->character.max_hp;
     snprintf(session->character.room, sizeof(session->character.room), "nexus");
@@ -1193,6 +1260,13 @@ static int race_is_hunted(const char *race) {
 }
 
 static void contribute_tide(hg_server *server, int delta) {
+  if (server->remote != NULL) {
+    int tide = 0;
+    if (hg_grid_shift_tide(server->remote, delta, &tide) == 0) {
+      server->tide = tide;
+      return;
+    }
+  }
   server->tide += delta;
   if (server->tide > HG_TIDE_CEIL) {
     server->tide = HG_TIDE_CEIL;
@@ -1800,6 +1874,16 @@ static void cmd_reckoning(hg_session *session, hg_server *server) {
 }
 
 static void cmd_war(hg_session *session, hg_server *server) {
+  if (server->remote != NULL) {
+    int tide = 0;
+    if (hg_grid_tide(server->remote, &tide) == 0) {
+      server->tide = tide;
+    } else {
+      queue_text(session,
+                 "The deep Grid is silent; you can't read the war from here.");
+      return;
+    }
+  }
   int tide = server->tide;
   const char *state = "the war hangs in perfect, brutal balance.";
   if (tide <= -50) {
@@ -1842,6 +1926,19 @@ static void cmd_gridcast(hg_session *session, hg_server *server, const char *arg
                "it to every world)");
     return;
   }
+  if (server->remote != NULL) {
+    if (hg_grid_gridcast(server->remote, server->config->world_name,
+                         session->character.name, arg) != 0) {
+      queue_text(session,
+                 "The Grid swallows your words; the network is unreachable.");
+      return;
+    }
+    queue_text(session,
+               "You cast your voice into the dead Grid, out across every node: "
+               "\"%s\"",
+               arg);
+    return;
+  }
   if (server->cast_count >= HG_MAX_CASTS) {
     memmove(&server->casts[0], &server->casts[1],
             sizeof(server->casts[0]) * (HG_MAX_CASTS - 1));
@@ -1860,7 +1957,97 @@ static void cmd_gridcast(hg_session *session, hg_server *server, const char *arg
              arg);
 }
 
-static void cmd_whoami(hg_session *session) {
+static void apply_hub_sheet(hg_character *character, const hg_char_sheet *sheet) {
+  if (sheet->level > 0) {
+    character->level = sheet->level;
+  }
+  character->xp = sheet->xp;
+  if (sheet->gold > 0 || sheet->race[0] != '\0') {
+    character->gold = sheet->gold;
+  }
+  if (sheet->faction[0] != '\0') {
+    snprintf(character->faction, sizeof(character->faction), "%s",
+             sheet->faction);
+  }
+  character->morality = sheet->morality;
+  snprintf(character->title, sizeof(character->title), "%s", sheet->title);
+  if (sheet->race[0] != '\0') {
+    snprintf(character->race, sizeof(character->race), "%s", sheet->race);
+  }
+  if (sheet->ashsworn) {
+    character->ashsworn = 1;
+  }
+}
+
+static void fill_hub_sheet(const hg_character *character, hg_char_sheet *sheet) {
+  memset(sheet, 0, sizeof(*sheet));
+  sheet->level = character->level;
+  sheet->xp = character->xp;
+  sheet->gold = character->gold;
+  sheet->morality = character->morality;
+  snprintf(sheet->faction, sizeof(sheet->faction), "%s", character->faction);
+  snprintf(sheet->title, sizeof(sheet->title), "%s", character->title);
+  snprintf(sheet->race, sizeof(sheet->race), "%s", character->race);
+  sheet->ashsworn = character->ashsworn;
+}
+
+static void commit_hub(hg_server *server, const hg_character *character) {
+  if (server->remote == NULL) {
+    return;
+  }
+  hg_char_sheet sheet;
+  fill_hub_sheet(character, &sheet);
+  (void)hg_grid_commit_character(server->remote, character->name, &sheet);
+}
+
+static void merge_hub_on_login(hg_server *server, hg_character *character) {
+  if (server->remote == NULL) {
+    return;
+  }
+  hg_char_sheet sheet;
+  int found = 0;
+  if (hg_grid_load_character(server->remote, character->name, &sheet, &found) !=
+      0) {
+    return;
+  }
+  apply_hub_sheet(character, &sheet);
+  const char *url = server->config->world_url;
+  if (url == NULL || url[0] == '\0') {
+    url = "ws://127.0.0.1:8792/ws";
+  }
+  (void)hg_grid_register(server->remote, server->config->world_name, url);
+}
+
+static void cmd_whoami(hg_session *session, hg_server *server) {
+  char local_faction[16];
+  char local_title[48];
+  int local_morality = session->character.morality;
+  snprintf(local_faction, sizeof(local_faction), "%s",
+           session->character.faction);
+  snprintf(local_title, sizeof(local_title), "%s", session->character.title);
+  if (server->remote != NULL) {
+    hg_char_sheet sheet;
+    int found = 0;
+    if (hg_grid_load_character(server->remote, session->character.name, &sheet,
+                               &found) == 0) {
+      apply_hub_sheet(&session->character, &sheet);
+      if (strcmp(local_faction, "ally") == 0 ||
+          strcmp(local_faction, "front") == 0) {
+        snprintf(session->character.faction, sizeof(session->character.faction),
+                 "%s", local_faction);
+      }
+      if (local_morality != 0 && session->character.morality == 0 &&
+          sheet.morality == 0) {
+        session->character.morality = local_morality;
+      }
+      if (local_title[0] != '\0') {
+        snprintf(session->character.title, sizeof(session->character.title),
+                 "%s", local_title);
+      }
+    } else {
+      queue_text(session, "(the Grid is unreachable; showing your local self)");
+    }
+  }
   const hg_character *c = &session->character;
   cJSON *payload = json_object();
   cJSON_AddNumberToObject(payload, "level", c->level);
@@ -1889,12 +2076,33 @@ static void cmd_whoami(hg_session *session) {
 }
 
 static void cmd_worlds(hg_session *session, hg_server *server) {
+  hg_grid_world remote_worlds[HG_MAX_WORLDS];
+  size_t remote_count = 0;
+  const hg_world_info *list = server->worlds;
+  size_t count = server->world_count;
+  hg_world_info converted[HG_MAX_WORLDS];
+  if (server->remote != NULL) {
+    if (hg_grid_list_worlds(server->remote, remote_worlds, HG_MAX_WORLDS,
+                            &remote_count) != 0) {
+      queue_text(session, "The Grid is silent; the registry is out of reach.");
+      return;
+    }
+    for (size_t i = 0; i < remote_count; ++i) {
+      snprintf(converted[i].id, sizeof(converted[i].id), "%s",
+               remote_worlds[i].id);
+      snprintf(converted[i].url, sizeof(converted[i].url), "%s",
+               remote_worlds[i].url);
+      converted[i].last_seen_ms = remote_worlds[i].last_seen_ms;
+    }
+    list = converted;
+    count = remote_count;
+  }
   long long now = (long long)time(NULL) * 1000;
   cJSON *payload = json_object();
   cJSON *rows = cJSON_AddArrayToObject(payload, "worlds");
   queue_text(session, "Worlds linked on the Grid (say 'travel <world>'):");
-  for (size_t i = 0; i < server->world_count; ++i) {
-    const hg_world_info *w = &server->worlds[i];
+  for (size_t i = 0; i < count; ++i) {
+    const hg_world_info *w = &list[i];
     int reachable = w->last_seen_ms > 0;
     int active = w->last_seen_ms > now - 60000;
     int here = strcmp(w->id, server->config->world_name) == 0;
@@ -1928,27 +2136,47 @@ static int cmd_travel(hg_session *session, hg_server *server, const char *arg) {
                "You can't key out through the Grid in the middle of a fight.");
     return 0;
   }
+  hg_world_info worlds[HG_MAX_WORLDS];
+  size_t world_count = server->world_count;
+  memcpy(worlds, server->worlds, sizeof(server->worlds[0]) * world_count);
+  if (server->remote != NULL) {
+    hg_grid_world remote_worlds[HG_MAX_WORLDS];
+    size_t remote_count = 0;
+    if (hg_grid_list_worlds(server->remote, remote_worlds, HG_MAX_WORLDS,
+                            &remote_count) != 0) {
+      queue_text(session,
+                 "The Grid won't answer; travel is impossible right now.");
+      return 0;
+    }
+    world_count = remote_count;
+    for (size_t i = 0; i < remote_count; ++i) {
+      snprintf(worlds[i].id, sizeof(worlds[i].id), "%s", remote_worlds[i].id);
+      snprintf(worlds[i].url, sizeof(worlds[i].url), "%s",
+               remote_worlds[i].url);
+      worlds[i].last_seen_ms = remote_worlds[i].last_seen_ms;
+    }
+  }
   char needle[64];
   snprintf(needle, sizeof(needle), "%s", arg);
   for (char *p = needle; *p != '\0'; ++p) {
     *p = (char)tolower((unsigned char)*p);
   }
   const hg_world_info *dest = NULL;
-  for (size_t i = 0; i < server->world_count; ++i) {
-    if (strcasecmp(server->worlds[i].id, arg) == 0) {
-      dest = &server->worlds[i];
+  for (size_t i = 0; i < world_count; ++i) {
+    if (strcasecmp(worlds[i].id, arg) == 0) {
+      dest = &worlds[i];
       break;
     }
   }
   if (dest == NULL) {
-    for (size_t i = 0; i < server->world_count; ++i) {
+    for (size_t i = 0; i < world_count; ++i) {
       char id_lower[48];
-      snprintf(id_lower, sizeof(id_lower), "%s", server->worlds[i].id);
+      snprintf(id_lower, sizeof(id_lower), "%s", worlds[i].id);
       for (char *p = id_lower; *p != '\0'; ++p) {
         *p = (char)tolower((unsigned char)*p);
       }
       if (strstr(id_lower, needle) != NULL) {
-        dest = &server->worlds[i];
+        dest = &worlds[i];
         break;
       }
     }
@@ -1964,6 +2192,7 @@ static int cmd_travel(hg_session *session, hg_server *server, const char *arg) {
     return 0;
   }
   hg_store_save(&server->store, &session->character);
+  commit_hub(server, &session->character);
   broadcast_room(server, session->character.room, session->character.name,
                  "%s keys into the Grid and is routed away, off the edge of "
                  "the world.",
@@ -2339,6 +2568,30 @@ static void cmd_gridstats(hg_session *session, hg_server *server) {
     queue_text(session, "Only a keeper of the Grid can read its deep memory.");
     return;
   }
+  if (server->remote != NULL) {
+    hg_grid_ledger_kind kinds[32];
+    size_t kind_n = 0;
+    int total = 0;
+    if (hg_grid_ledger_stats(server->remote, kinds, 32, &kind_n, &total) != 0) {
+      queue_text(session, "The hub is unreachable; the deep memory cannot be read.");
+      return;
+    }
+    cJSON *payload = json_object();
+    cJSON_AddNumberToObject(payload, "total", total);
+    cJSON *arr = cJSON_AddArrayToObject(payload, "kinds");
+    for (size_t i = 0; i < kind_n; ++i) {
+      cJSON *row = cJSON_CreateObject();
+      cJSON_AddStringToObject(row, "kind", kinds[i].kind);
+      cJSON_AddNumberToObject(row, "count", kinds[i].count);
+      cJSON_AddItemToArray(arr, row);
+    }
+    queue_event(session, "grid.ledger_stats", payload);
+    queue_text(session, "The Grid ledger holds %d trace(s):", total);
+    for (size_t i = 0; i < kind_n; ++i) {
+      queue_text(session, "  %-10s %d", kinds[i].kind, kinds[i].count);
+    }
+    return;
+  }
   cJSON *payload = json_object();
   cJSON_AddNumberToObject(payload, "total", (double)server->trace_count);
   cJSON *kinds = cJSON_AddArrayToObject(payload, "kinds");
@@ -2374,6 +2627,45 @@ static void cmd_gridstats(hg_session *session, hg_server *server) {
 static void cmd_gridprune(hg_session *session, hg_server *server) {
   if (!is_admin(server, session->character.name)) {
     queue_text(session, "Only a keeper of the Grid can prune its deep memory.");
+    return;
+  }
+  if (server->remote != NULL) {
+    hg_grid_ledger_kind before_kinds[32];
+    size_t before_n = 0;
+    int before_total = 0;
+    if (hg_grid_ledger_stats(server->remote, before_kinds, 32, &before_n,
+                             &before_total) != 0) {
+      queue_text(session,
+                 "The hub is unreachable; the deep memory cannot be tended.");
+      return;
+    }
+    int removed = 0;
+    if (hg_grid_prune_ledger(server->remote, &removed) != 0) {
+      queue_text(session,
+                 "The hub is unreachable; the deep memory cannot be tended.");
+      return;
+    }
+    hg_grid_ledger_kind after_kinds[32];
+    size_t after_n = 0;
+    int after_total = 0;
+    if (hg_grid_ledger_stats(server->remote, after_kinds, 32, &after_n,
+                             &after_total) != 0) {
+      after_total = before_total - removed;
+    }
+    cJSON *payload = json_object();
+    cJSON_AddNumberToObject(payload, "before", before_total);
+    cJSON_AddNumberToObject(payload, "after", after_total);
+    cJSON_AddNumberToObject(payload, "removed", removed);
+    cJSON *kinds = cJSON_AddArrayToObject(payload, "kinds");
+    for (size_t i = 0; i < after_n; ++i) {
+      cJSON *row = cJSON_CreateObject();
+      cJSON_AddStringToObject(row, "kind", after_kinds[i].kind);
+      cJSON_AddNumberToObject(row, "count", after_kinds[i].count);
+      cJSON_AddItemToArray(kinds, row);
+    }
+    queue_event(session, "grid.ledger_pruned", payload);
+    queue_text(session, "Ambient traces pruned (%d -> %d).", before_total,
+               after_total);
     return;
   }
   size_t before = server->trace_count;
@@ -2946,6 +3238,35 @@ static void cmd_who(hg_session *session, hg_server *server) {
     }
     any = 1;
   }
+  if (server->remote != NULL) {
+    hg_grid_presence remote[64];
+    size_t remote_n = 0;
+    if (hg_grid_fetch_presence(server->remote, 60000, remote, 64, &remote_n) ==
+        0) {
+      for (size_t i = 0; i < remote_n; ++i) {
+        if (strcmp(remote[i].world, server->config->world_name) == 0) {
+          continue;
+        }
+        cJSON *row = cJSON_CreateObject();
+        cJSON_AddStringToObject(row, "world", remote[i].world);
+        cJSON_AddStringToObject(row, "name", remote[i].name);
+        cJSON_AddStringToObject(row, "regard", remote[i].regard);
+        cJSON_AddBoolToObject(row, "here", 0);
+        cJSON_AddStringToObject(row, "title", remote[i].title);
+        cJSON_AddItemToArray(players, row);
+        char entry[128];
+        snprintf(entry, sizeof(entry), "%s [%s]", remote[i].name,
+                 remote[i].world);
+        int written =
+            snprintf(line + used, sizeof(line) - used, "%s %s", any ? ";" : "",
+                     entry);
+        if (written > 0 && (size_t)written < sizeof(line) - used) {
+          used += (size_t)written;
+        }
+        any = 1;
+      }
+    }
+  }
   queue_event(session, "grid.who", payload);
   if (!any) {
     queue_text(session, "No one else walks the wastes right now.");
@@ -3294,7 +3615,7 @@ static void handle_play(hg_session *session, hg_server *server, char *input) {
     return;
   }
   if (strcmp(verb, "whoami") == 0 || strcmp(verb, "identity") == 0) {
-    cmd_whoami(session);
+    cmd_whoami(session, server);
     return;
   }
   if (strcmp(verb, "worlds") == 0) {
@@ -3669,13 +3990,21 @@ static int handle_http(struct lws *wsi, hg_server *server, const char *path) {
     return send_http_json(wsi, HTTP_STATUS_OK, body);
   }
   if (strcmp(path, "/health/deep") == 0) {
+    long latency = 0;
+    int hub_ok = 1;
+    const char *mode = "local";
+    if (server->remote != NULL) {
+      mode = "remote";
+      hub_ok = hg_grid_ping(server->remote, &latency) == 0;
+    }
     snprintf(
         body, sizeof(body),
         "{\"ok\":true,\"ts\":%lld,\"world\":\"%s\",\"checks\":{"
         "\"world\":{\"ok\":true,\"latency_ms\":0,\"critical\":true},"
-        "\"grid_hub\":{\"ok\":true,\"latency_ms\":0,\"critical\":false,"
-        "\"mode\":\"local\"}}}",
-        now, server->config->world_name);
+        "\"grid_hub\":{\"ok\":%s,\"latency_ms\":%ld,\"critical\":false,"
+        "\"mode\":\"%s\"}}}",
+        now, server->config->world_name, hub_ok ? "true" : "false", latency,
+        mode);
     return send_http_json(wsi, HTTP_STATUS_OK, body);
   }
   if (strcmp(path, "/map.svg") == 0) {
@@ -3774,6 +4103,10 @@ static int callback(struct lws *wsi, enum lws_callback_reasons reason,
     }
     return 0;
   case LWS_CALLBACK_CLOSED:
+    if (session->state == HG_PLAYING) {
+      hg_store_save(&server->store, &session->character);
+      commit_hub(server, &session->character);
+    }
     session_unregister(server, session);
     free_messages(session);
     return 0;
@@ -3799,10 +4132,29 @@ int hg_server_run(const hg_server_config *config) {
     return 1;
   }
   parse_admins(&server, config->admins);
+  server.remote = hg_grid_open(config->grid_hub_url, config->grid_hub_token);
   hg_world_init(&server.world);
   seed_traces(&server);
   seed_worlds(&server);
   srand((unsigned)time(NULL));
+
+  if (server.remote != NULL) {
+    const char *url = config->world_url;
+    if (url == NULL || url[0] == '\0') {
+      url = "ws://127.0.0.1:8792/ws";
+    }
+    if (hg_grid_register(server.remote, config->world_name, url) == 0) {
+      fprintf(stdout, "registered on the Grid as %s (%s)\n", config->world_name,
+              url);
+    } else {
+      fprintf(stderr, "grid register failed for %s (continuing)\n",
+              config->world_name);
+    }
+    int tide = 0;
+    if (hg_grid_tide(server.remote, &tide) == 0) {
+      server.tide = tide;
+    }
+  }
 
   struct lws_context_creation_info info;
   memset(&info, 0, sizeof(info));
@@ -3816,11 +4168,12 @@ int hg_server_run(const hg_server_config *config) {
   server.context = lws_create_context(&info);
   if (server.context == NULL) {
     fprintf(stderr, "cannot create WebSocket server context\n");
+    hg_grid_close(server.remote);
     return 1;
   }
 
-  fprintf(stdout, "%s listening on %s:%d\n", config->world_name, config->host,
-          config->port);
+  fprintf(stdout, "%s listening on %s:%d%s\n", config->world_name, config->host,
+          config->port, server.remote != NULL ? " [federation]" : "");
   stop_requested = 0;
   while (!stop_requested) {
     poll_gridcasts(&server);
@@ -3829,5 +4182,6 @@ int hg_server_run(const hg_server_config *config) {
     }
   }
   lws_context_destroy(server.context);
+  hg_grid_close(server.remote);
   return 0;
 }
