@@ -1,0 +1,70 @@
+name: code-coverage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  id-token: write
+  code-quality: write
+  pull-requests: write
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install C toolchain and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libcjson-dev libwebsockets-dev pkg-config gcovr
+
+      - name: Setup Node.js (for Smoke Engine)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Clone Upstream Conformance Suite
+        run: |
+          git clone --depth 1 https://github.com/skyphusion-labs/the-hollow-grid.git upstream-mud
+          cd upstream-mud && npm install
+
+      - name: Build instrumented binaries
+        run: make COVERAGE=1 all test
+
+      - name: Run E2E Smoke Conformance Suite
+        run: |
+          DATA_DIR=$(mktemp -d) ./build/hollow-grid-c --addr 127.0.0.1:8792 &
+          SERVER_PID=$!
+
+          timeout 30s bash -c 'until curl -sf http://127.0.0.1:8792/health; do sleep 1; done'
+
+          MUD_URL=ws://127.0.0.1:8792/ws timeout 120s node upstream-mud/smoke.mjs || true
+
+          # SIGTERM triggers graceful shutdown (main returns), flushing gcov data.
+          kill -SIGTERM $SERVER_PID || kill -9 $SERVER_PID
+          wait $SERVER_PID 2>/dev/null || true
+          sleep 2
+
+      - name: Generate Cobertura coverage report
+        run: |
+          gcovr --root . --filter 'src/' \
+            --exclude 'tests/' \
+            --cobertura coverage.xml \
+            --print-summary
+
+      - name: Upload coverage report
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/upload-code-coverage@v1
+        with:
+          file: ./coverage.xml
+          language: C
