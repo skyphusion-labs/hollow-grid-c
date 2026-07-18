@@ -2,7 +2,7 @@
 
 Porting the Hollow Grid world framework to C, against upstream
 `the-hollow-grid/docs/protocol.md`. The scoreboard is upstream `smoke.mjs`
-(**153 executable standalone checks** on the 2026-07-17 revision): build the
+(**159 executable checks** on the 2026-07-17 revision): build the
 port to pass it, phase by phase.
 
 Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`.
@@ -47,8 +47,11 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 - [x] LocalHub federation fallback (gridcast poll, seeded worlds/Saltreach, whoami)
 - [x] Remote Grid Hub HTTP/JSON client (`GRID_HUB_URL` via libcurl)
 - [x] Federation loop over RemoteHub (register, presence, cast relay, tide cache)
+- [x] Background federation worker (periodic RPC + identity commits stay off the
+      WebSocket event loop)
 - [x] Canonical CharSheet merge on login / commit on disconnect+travel
-- [ ] Live hub smoke with a second world (`DUSTFALL_URL`) -- needs hub token + Dustfall
+- [x] Live hub smoke with Dustfall; two consecutive stateful runs on one process
+      pass all 159 checks
 
 ## Phase 3 -- container + release
 

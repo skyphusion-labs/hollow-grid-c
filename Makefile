@@ -6,6 +6,8 @@ LDFLAGS ?=
 LDLIBS ?=
 
 DEPS := libwebsockets libcjson openssl libcurl
+CFLAGS += -pthread
+LDLIBS += -pthread
 CPPFLAGS += $(shell $(PKG_CONFIG) --cflags $(DEPS))
 LDLIBS += $(shell $(PKG_CONFIG) --libs $(DEPS))
 
