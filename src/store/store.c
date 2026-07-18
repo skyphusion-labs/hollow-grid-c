@@ -90,6 +90,7 @@ void hg_character_new(hg_character *character, const char *name) {
   character->hp = 30;
   character->max_hp = 30;
   character->level = 1;
+  character->gold = 20;
 }
 
 int hg_character_has_item(const hg_character *character, const char *item_id) {

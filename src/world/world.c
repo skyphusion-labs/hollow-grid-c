@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 static const hg_room rooms[] = {
     {.id = "nexus",
@@ -289,7 +290,7 @@ hg_live_mob *hg_world_mob_in_room(hg_world_state *state, const char *room_id,
   for (size_t i = 0; i < state->mob_count; ++i) {
     hg_live_mob *mob = &state->mobs[i];
     if (mob->alive && strcmp(mob->room, room_id) == 0 &&
-        strcmp(mob->id, mob_id) == 0) {
+        strcasecmp(mob->id, mob_id) == 0) {
       return mob;
     }
   }
