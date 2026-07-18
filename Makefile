@@ -17,11 +17,13 @@ SRC := \
 	src/event/event.c \
 	src/store/store.c \
 	src/transport/server.c \
+	src/world/items.c \
 	src/world/world.c
 TEST_SRC := \
 	tests/test_core.c \
 	src/event/event.c \
 	src/store/store.c \
+	src/world/items.c \
 	src/world/world.c
 
 .PHONY: all clean check test

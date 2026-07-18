@@ -1,6 +1,7 @@
 #include "hg_server.h"
 
 #include "hg_event.h"
+#include "hg_items.h"
 #include "hg_store.h"
 #include "hg_world.h"
 
@@ -15,6 +16,9 @@
 #include <strings.h>
 #include <time.h>
 
+#define HG_HEARTBEAT_USEC 2000000
+#define HG_MAX_TRACES 64
+
 typedef enum {
   HG_WAIT_NAME,
   HG_WAIT_RACE,
@@ -27,9 +31,18 @@ typedef struct hg_message {
 } hg_message;
 
 typedef struct {
+  char world[48];
+  char node[32];
+  char kind[16];
+  char text[160];
+} hg_trace;
+
+typedef struct {
   struct lws *wsi;
   hg_session_state state;
   hg_character character;
+  char target[16];
+  int market_resolved;
   hg_message *out_head;
   hg_message *out_tail;
   char input[512];
@@ -40,6 +53,9 @@ typedef struct {
   const hg_server_config *config;
   struct lws_context *context;
   hg_store store;
+  hg_world_state world;
+  hg_trace traces[HG_MAX_TRACES];
+  size_t trace_count;
   time_t started;
 } hg_server;
 
@@ -111,6 +127,39 @@ static int queue_event(hg_session *session, const char *name, cJSON *payload) {
 
 static cJSON *json_object(void) { return cJSON_CreateObject(); }
 
+static void record_trace(hg_server *server, const char *world, const char *node,
+                         const char *kind, const char *text) {
+  if (server->trace_count >= HG_MAX_TRACES) {
+    memmove(&server->traces[0], &server->traces[1],
+            sizeof(server->traces[0]) * (HG_MAX_TRACES - 1));
+    server->trace_count = HG_MAX_TRACES - 1;
+  }
+  hg_trace *trace = &server->traces[server->trace_count++];
+  memset(trace, 0, sizeof(*trace));
+  snprintf(trace->world, sizeof(trace->world), "%s", world);
+  snprintf(trace->node, sizeof(trace->node), "%s", node);
+  snprintf(trace->kind, sizeof(trace->kind), "%s", kind);
+  snprintf(trace->text, sizeof(trace->text), "%s", text);
+}
+
+static void seed_traces(hg_server *server) {
+  record_trace(server, "The Hollow Grid", "nexus", "passage",
+               "a silhouette vanished into the neon rot");
+  record_trace(server, "Dustfall", "dunes", "ghost",
+               "salt wind carried a name nobody claimed");
+  record_trace(server, "Rust Choir", "grid-gate", "recall",
+               "the Memorial Static scrolled a forgotten oath");
+}
+
+static int player_damage(const hg_character *character) {
+  int damage = 1 + character->level;
+  const hg_item *weapon = hg_item_by_id(character->weapon);
+  if (weapon != NULL) {
+    damage += weapon->damage;
+  }
+  return damage;
+}
+
 static void send_world_state(hg_session *session, const hg_server *server) {
   static const char *phases[] = {"dawn", "day", "dusk", "night"};
   static const char *weather[] = {
@@ -127,31 +176,6 @@ static void send_world_state(hg_session *session, const hg_server *server) {
   queue_event(session, "world.state", payload);
 }
 
-static void send_room_info(hg_session *session, const hg_room *room) {
-  cJSON *payload = json_object();
-  cJSON_AddStringToObject(payload, "id", room->id);
-  cJSON_AddStringToObject(payload, "name", room->name);
-
-  cJSON *exits = cJSON_AddArrayToObject(payload, "exits");
-  for (size_t i = 0; i < room->exit_count; ++i) {
-    cJSON_AddItemToArray(exits,
-                        cJSON_CreateString(room->exits[i].direction));
-  }
-
-  cJSON *mobs = cJSON_AddArrayToObject(payload, "mobs");
-  for (size_t i = 0; i < room->mob_count; ++i) {
-    cJSON *mob = cJSON_CreateObject();
-    cJSON_AddStringToObject(mob, "id", room->mobs[i].id);
-    cJSON_AddStringToObject(mob, "name", room->mobs[i].name);
-    cJSON_AddNumberToObject(mob, "hp", room->mobs[i].hp);
-    cJSON_AddNumberToObject(mob, "maxHp", room->mobs[i].max_hp);
-    cJSON_AddItemToArray(mobs, mob);
-  }
-  cJSON_AddArrayToObject(payload, "items");
-  cJSON_AddArrayToObject(payload, "players");
-  queue_event(session, "room.info", payload);
-}
-
 static void send_vitals(hg_session *session) {
   const hg_character *character = &session->character;
   cJSON *payload = json_object();
@@ -161,9 +185,9 @@ static void send_vitals(hg_session *session) {
   cJSON_AddNumberToObject(payload, "xp", character->xp);
   cJSON_AddNumberToObject(payload, "gold", character->gold);
   cJSON_AddStringToObject(payload, "room", character->room);
-  cJSON_AddBoolToObject(payload, "inCombat", 0);
+  cJSON_AddBoolToObject(payload, "inCombat", session->target[0] != '\0');
   cJSON_AddBoolToObject(payload, "poisoned", 0);
-  cJSON_AddStringToObject(payload, "position", "standing");
+  cJSON_AddStringToObject(payload, "position", character->position);
   queue_event(session, "char.vitals", payload);
 }
 
@@ -179,23 +203,76 @@ static void send_affects(hg_session *session) {
   queue_event(session, "char.affects", payload);
 }
 
+static void send_equipment(hg_session *session) {
+  cJSON *payload = json_object();
+  if (session->character.weapon[0] != '\0') {
+    cJSON_AddStringToObject(payload, "weapon", session->character.weapon);
+  } else {
+    cJSON_AddNullToObject(payload, "weapon");
+  }
+  cJSON_AddNullToObject(payload, "head");
+  cJSON_AddNullToObject(payload, "body");
+  cJSON_AddNullToObject(payload, "hands");
+  cJSON_AddNullToObject(payload, "feet");
+  queue_event(session, "char.equipment", payload);
+}
+
 static void send_actions(hg_session *session, const hg_room *room) {
   cJSON *payload = json_object();
   cJSON *actions = cJSON_AddArrayToObject(payload, "actions");
   for (size_t i = 0; i < room->action_count; ++i) {
+    if (session->market_resolved &&
+        (strcmp(room->actions[i].verb, "join") == 0 ||
+         strcmp(room->actions[i].verb, "defend") == 0)) {
+      continue;
+    }
     cJSON *action = cJSON_CreateObject();
     cJSON_AddStringToObject(action, "verb", room->actions[i].verb);
     cJSON_AddStringToObject(action, "label", room->actions[i].label);
     cJSON_AddStringToObject(action, "kind", room->actions[i].kind);
-    if (room->actions[i].valence != NULL) {
-      cJSON_AddStringToObject(action, "valence", room->actions[i].valence);
+    const char *valence = room->actions[i].valence;
+    if (strcmp(room->actions[i].verb, "join") == 0 &&
+        strcmp(session->character.race, "elf") == 0) {
+      valence = "grave";
+    }
+    if (valence != NULL) {
+      cJSON_AddStringToObject(action, "valence", valence);
     }
     cJSON_AddItemToArray(actions, action);
   }
   queue_event(session, "room.actions", payload);
 }
 
-static void send_scene(hg_session *session, const hg_server *server) {
+static void send_room_info(hg_session *session, hg_server *server,
+                           const hg_room *room) {
+  cJSON *payload = json_object();
+  cJSON_AddStringToObject(payload, "id", room->id);
+  cJSON_AddStringToObject(payload, "name", room->name);
+
+  cJSON *exits = cJSON_AddArrayToObject(payload, "exits");
+  for (size_t i = 0; i < room->exit_count; ++i) {
+    cJSON_AddItemToArray(exits, cJSON_CreateString(room->exits[i].direction));
+  }
+
+  cJSON *mobs = cJSON_AddArrayToObject(payload, "mobs");
+  hg_live_mob *live[HG_MAX_LIVE_MOBS];
+  size_t count =
+      hg_world_mobs_in_room(&server->world, room->id, live, HG_MAX_LIVE_MOBS);
+  for (size_t i = 0; i < count; ++i) {
+    cJSON *mob = cJSON_CreateObject();
+    cJSON_AddStringToObject(mob, "id", live[i]->id);
+    cJSON_AddStringToObject(mob, "name", live[i]->name);
+    cJSON_AddNumberToObject(mob, "hp", live[i]->hp);
+    cJSON_AddNumberToObject(mob, "maxHp", live[i]->max_hp);
+    cJSON_AddItemToArray(mobs, mob);
+  }
+  cJSON_AddArrayToObject(payload, "items");
+  cJSON_AddArrayToObject(payload, "players");
+  queue_event(session, "room.info", payload);
+}
+
+static void send_scene(hg_session *session, hg_server *server) {
+  hg_world_tick_respawns(&server->world);
   const hg_room *room = hg_world_room(session->character.room);
   if (room == NULL) {
     snprintf(session->character.room, sizeof(session->character.room), "nexus");
@@ -204,13 +281,18 @@ static void send_scene(hg_session *session, const hg_server *server) {
 
   queue_text(session, "\033[1;38;5;208m%s\033[0m", room->name);
   queue_text(session, "%s", room->description);
+  hg_live_mob *live[HG_MAX_LIVE_MOBS];
+  size_t count =
+      hg_world_mobs_in_room(&server->world, room->id, live, HG_MAX_LIVE_MOBS);
+  for (size_t i = 0; i < count; ++i) {
+    queue_text(session, "Here: %s.", live[i]->name);
+  }
   if (room->exit_count > 0) {
     char exit_line[160] = "Exits:";
     size_t used = strlen(exit_line);
     for (size_t i = 0; i < room->exit_count; ++i) {
-      int written =
-          snprintf(exit_line + used, sizeof(exit_line) - used, " %s",
-                   room->exits[i].direction);
+      int written = snprintf(exit_line + used, sizeof(exit_line) - used, " %s",
+                             room->exits[i].direction);
       if (written < 0 || (size_t)written >= sizeof(exit_line) - used) {
         break;
       }
@@ -218,19 +300,16 @@ static void send_scene(hg_session *session, const hg_server *server) {
     }
     queue_text(session, "%s", exit_line);
   }
-  send_room_info(session, room);
+  send_room_info(session, server, room);
   send_vitals(session);
   send_affects(session);
   send_actions(session, room);
-  (void)server;
 }
 
 static void send_creation_menu(hg_session *session) {
   queue_text(session, "Choose what the wastes made of you:");
-  queue_text(session,
-             "  1) Human      2) Elf       3) Revenant   4) Ghoul");
-  queue_text(session,
-             "  5) Chromed    6) Dustkin   7) Vatborn");
+  queue_text(session, "  1) Human      2) Elf       3) Revenant   4) Ghoul");
+  queue_text(session, "  5) Chromed    6) Dustkin   7) Vatborn");
   queue_text(session, "Type a number or a name.");
 
   cJSON *payload = json_object();
@@ -255,17 +334,26 @@ static const char *parse_race(const char *input) {
   return NULL;
 }
 
-static void finish_login(hg_session *session, hg_server *server,
-                         int resumed) {
+static void arm_heartbeat(hg_session *session) {
+  lws_set_timer_usecs(session->wsi, HG_HEARTBEAT_USEC);
+}
+
+static void finish_login(hg_session *session, hg_server *server, int resumed) {
   session->state = HG_PLAYING;
   if (hg_world_room(session->character.room) == NULL) {
     snprintf(session->character.room, sizeof(session->character.room), "nexus");
   }
-  queue_text(session, resumed ? "The Grid finds your old charge, %s."
-                              : "The field takes your measure, %s.",
+  if (session->character.position[0] == '\0') {
+    snprintf(session->character.position, sizeof(session->character.position),
+             "standing");
+  }
+  queue_text(session,
+             resumed ? "The Grid finds your old charge, %s."
+                     : "The field takes your measure, %s. Type help for verbs.",
              session->character.name);
   send_world_state(session, server);
   send_scene(session, server);
+  arm_heartbeat(session);
 }
 
 static char *trim(char *text) {
@@ -319,19 +407,217 @@ static void handle_race(hg_session *session, hg_server *server,
   finish_login(session, server, 0);
 }
 
-static void handle_play(hg_session *session, hg_server *server,
-                        const char *input) {
-  char command[128];
+static const char *consider_line(const hg_character *character,
+                                 const hg_live_mob *mob) {
+  double ratio = (double)mob->max_hp / (double)character->max_hp;
+  if (ratio < 0.5) {
+    return "You could put %s down without breaking a sweat.";
+  }
+  if (ratio < 0.9) {
+    return "%s would give you a tussle, but the odds are yours.";
+  }
+  if (ratio < 1.3) {
+    return "%s looks like an even match. Bring an antidote.";
+  }
+  if (ratio < 2.0) {
+    return "%s would likely gut you. Think twice.";
+  }
+  return "Attacking %s would be a quiet way to die.";
+}
+
+static void combat_round(hg_session *session, hg_server *server) {
+  hg_live_mob *mob = hg_world_mob_in_room(&server->world, session->character.room,
+                                          session->target);
+  if (mob == NULL) {
+    session->target[0] = '\0';
+    cJSON *end = json_object();
+    cJSON_AddStringToObject(end, "mob", "gone");
+    cJSON_AddStringToObject(end, "result", "gone");
+    queue_event(session, "combat.end", end);
+    queue_text(session, "Your quarry is gone. You stand down.");
+    send_vitals(session);
+    return;
+  }
+
+  int player_dmg = player_damage(&session->character);
+  mob->hp -= player_dmg;
+  if (mob->hp < 0) {
+    mob->hp = 0;
+  }
+  int mob_dmg = 0;
+  if (mob->hp > 0) {
+    mob_dmg = mob->damage;
+    session->character.hp -= mob_dmg;
+  }
+
+  cJSON *round = json_object();
+  cJSON_AddStringToObject(round, "mob", mob->id);
+  cJSON_AddNumberToObject(round, "mobHp", mob->hp);
+  cJSON_AddNumberToObject(round, "mobMaxHp", mob->max_hp);
+  cJSON_AddNumberToObject(round, "playerDmg", player_dmg);
+  cJSON_AddNumberToObject(round, "mobDmg", mob_dmg);
+  cJSON_AddNumberToObject(round, "hp", session->character.hp);
+  queue_event(session, "combat.round", round);
+
+  if (mob->hp <= 0) {
+    char slain[128];
+    snprintf(slain, sizeof(slain), "%s slew %s here.", session->character.name,
+             mob->name);
+    record_trace(server, server->config->world_name, session->character.room,
+                 "slain", slain);
+    session->character.xp += mob->xp;
+    mob->alive = 0;
+    mob->died_at = time(NULL);
+    session->target[0] = '\0';
+    cJSON *end = json_object();
+    cJSON_AddStringToObject(end, "mob", mob->id);
+    cJSON_AddStringToObject(end, "result", "killed");
+    queue_event(session, "combat.end", end);
+    queue_text(session, "You have slain %s!  (+%d xp)", mob->name, mob->xp);
+    hg_store_save(&server->store, &session->character);
+    send_vitals(session);
+    return;
+  }
+
+  if (session->character.hp <= 0) {
+    session->character.hp = session->character.max_hp;
+    snprintf(session->character.room, sizeof(session->character.room), "nexus");
+    snprintf(session->character.position, sizeof(session->character.position),
+             "standing");
+    session->target[0] = '\0';
+    cJSON *end = json_object();
+    cJSON_AddStringToObject(end, "mob", mob->id);
+    cJSON_AddStringToObject(end, "result", "died");
+    queue_event(session, "combat.end", end);
+    cJSON *died = json_object();
+    cJSON_AddStringToObject(died, "respawnRoom", "nexus");
+    cJSON_AddNumberToObject(died, "hp", session->character.hp);
+    cJSON_AddNumberToObject(died, "maxHp", session->character.max_hp);
+    queue_event(session, "char.died", died);
+    queue_text(session,
+               "The dark takes you -- and the Grid, stubborn, reknits you at "
+               "the Ferrite Nexus.");
+    send_vitals(session);
+    send_scene(session, server);
+    return;
+  }
+
+  send_vitals(session);
+}
+
+static void on_tick(hg_session *session, hg_server *server) {
+  hg_world_tick_respawns(&server->world);
+  send_world_state(session, server);
+  if (session->target[0] != '\0') {
+    combat_round(session, server);
+  } else if (strcmp(session->character.position, "resting") == 0 &&
+             session->character.hp < session->character.max_hp) {
+    session->character.hp += 2;
+    if (session->character.hp > session->character.max_hp) {
+      session->character.hp = session->character.max_hp;
+    }
+    send_vitals(session);
+  }
+  arm_heartbeat(session);
+}
+
+static void cmd_inventory(hg_session *session) {
+  if (session->character.inventory_count == 0) {
+    queue_text(session, "You carry nothing.");
+    return;
+  }
+  char line[256] = "You carry:";
+  size_t used = strlen(line);
+  for (size_t i = 0; i < session->character.inventory_count; ++i) {
+    const char *name = hg_item_name(session->character.inventory[i]);
+    int written = snprintf(line + used, sizeof(line) - used, "%s %s",
+                           i == 0 ? "" : ",", name);
+    if (written < 0 || (size_t)written >= sizeof(line) - used) {
+      break;
+    }
+    used += (size_t)written;
+  }
+  queue_text(session, "%s.", line);
+}
+
+static void cmd_join(hg_session *session, hg_server *server) {
+  const hg_room *room = hg_world_room(session->character.room);
+  if (room == NULL ||
+      (strcmp(room->id, "market") != 0 &&
+       strcmp(room->id, "bias-checkpoint") != 0)) {
+    queue_text(session, "There is no Front recruiter here.");
+    return;
+  }
+  snprintf(session->character.faction, sizeof(session->character.faction),
+           "front");
+  session->character.morality -= 20;
+  session->market_resolved = 1;
+  if (strcmp(session->character.race, "elf") == 0) {
+    session->character.ashsworn = 1;
+    snprintf(session->character.title, sizeof(session->character.title),
+             "the ash-sworn");
+    queue_text(session,
+               "You take the Front's coin. The wastes mark you ash-sworn.");
+  } else {
+    queue_text(session, "You take the Front's coin and look away.");
+  }
+  record_trace(server, server->config->world_name, session->character.room,
+               "oath", "a Cinder Front oath was sworn here");
+  hg_store_save(&server->store, &session->character);
+  send_affects(session);
+  send_actions(session, room);
+}
+
+static void cmd_defend(hg_session *session, hg_server *server) {
+  const hg_room *room = hg_world_room(session->character.room);
+  if (room == NULL ||
+      (strcmp(room->id, "market") != 0 &&
+       strcmp(room->id, "bias-checkpoint") != 0)) {
+    queue_text(session, "There is no one here asking for your stand.");
+    return;
+  }
+  snprintf(session->character.faction, sizeof(session->character.faction),
+           "free");
+  session->character.morality += 10;
+  session->market_resolved = 1;
+  queue_text(session, "You put yourself between the Front and the living.");
+  record_trace(server, server->config->world_name, session->character.room,
+               "defense", "someone stood with the refugees here");
+  hg_store_save(&server->store, &session->character);
+  send_affects(session);
+  send_actions(session, room);
+}
+
+static void handle_play(hg_session *session, hg_server *server, char *input) {
+  hg_world_tick_respawns(&server->world);
+  char command[160];
   snprintf(command, sizeof(command), "%s", input);
   for (char *p = command; *p != '\0'; ++p) {
     *p = (char)tolower((unsigned char)*p);
   }
   char *verb = trim(command);
-  if (strncmp(verb, "go ", 3) == 0) {
-    verb = trim(verb + 3);
+  char *arg = NULL;
+  char *space = strchr(verb, ' ');
+  if (space != NULL) {
+    *space = '\0';
+    arg = trim(space + 1);
+  }
+  if (strncmp(verb, "go", 2) == 0 && arg != NULL) {
+    verb = arg;
+    arg = NULL;
   }
 
   if (strcmp(verb, "look") == 0 || strcmp(verb, "l") == 0) {
+    if (arg != NULL && arg[0] != '\0') {
+      hg_live_mob *mob =
+          hg_world_mob_in_room(&server->world, session->character.room, arg);
+      if (mob != NULL) {
+        queue_text(session, "%s", mob->description);
+      } else {
+        queue_text(session, "You don't see that here.");
+      }
+      return;
+    }
     send_scene(session, server);
     return;
   }
@@ -352,18 +638,219 @@ static void handle_play(hg_session *session, hg_server *server,
     }
     return;
   }
+  if (strcmp(verb, "inventory") == 0 || strcmp(verb, "inv") == 0 ||
+      strcmp(verb, "i") == 0) {
+    cmd_inventory(session);
+    return;
+  }
+  if (strcmp(verb, "wield") == 0 || strcmp(verb, "wear") == 0 ||
+      strcmp(verb, "equip") == 0) {
+    if (arg == NULL || !hg_character_has_item(&session->character, arg)) {
+      queue_text(session, "You have nothing like that to wear.");
+      return;
+    }
+    const hg_item *item = hg_item_by_id(arg);
+    if (item == NULL || item->slot == NULL ||
+        strcmp(item->slot, "weapon") != 0) {
+      queue_text(session, "You have nothing like that to wear.");
+      return;
+    }
+    snprintf(session->character.weapon, sizeof(session->character.weapon), "%s",
+             arg);
+    queue_text(session, "You ready %s.", item->name);
+    send_equipment(session);
+    hg_store_save(&server->store, &session->character);
+    return;
+  }
+  if (strcmp(verb, "remove") == 0 || strcmp(verb, "unwield") == 0) {
+    if (arg == NULL || strcmp(session->character.weapon, arg) != 0) {
+      queue_text(session, "You are not wearing that.");
+      return;
+    }
+    session->character.weapon[0] = '\0';
+    queue_text(session, "You put %s away.", hg_item_name(arg));
+    send_equipment(session);
+    hg_store_save(&server->store, &session->character);
+    return;
+  }
+  if (strcmp(verb, "consider") == 0 || strcmp(verb, "con") == 0) {
+    if (arg == NULL) {
+      queue_text(session, "There's nothing like that here to size up.");
+      return;
+    }
+    hg_live_mob *mob =
+        hg_world_mob_in_room(&server->world, session->character.room, arg);
+    if (mob == NULL) {
+      queue_text(session, "There's nothing like that here to size up.");
+      return;
+    }
+    char line[192];
+    snprintf(line, sizeof(line), consider_line(&session->character, mob),
+             mob->name);
+    queue_text(session, "%s", line);
+    return;
+  }
+  if (strcmp(verb, "attack") == 0 || strcmp(verb, "kill") == 0 ||
+      strcmp(verb, "k") == 0) {
+    if (session->target[0] != '\0') {
+      queue_text(session, "You're already locked in this fight.");
+      return;
+    }
+    hg_live_mob *live[HG_MAX_LIVE_MOBS];
+    size_t count = hg_world_mobs_in_room(&server->world, session->character.room,
+                                         live, HG_MAX_LIVE_MOBS);
+    hg_live_mob *mob = NULL;
+    if (arg != NULL && arg[0] != '\0') {
+      mob = hg_world_mob_in_room(&server->world, session->character.room, arg);
+    }
+    if (mob == NULL) {
+      if (count > 0) {
+        char names[160] = "";
+        size_t used = 0;
+        for (size_t i = 0; i < count; ++i) {
+          int written =
+              snprintf(names + used, sizeof(names) - used, "%s%s",
+                       i == 0 ? "" : ", ", live[i]->name);
+          if (written < 0 || (size_t)written >= sizeof(names) - used) {
+            break;
+          }
+          used += (size_t)written;
+        }
+        queue_text(session,
+                   "There's nothing like %s to fight here. You could try: %s.",
+                   arg != NULL && arg[0] != '\0' ? arg : "that", names);
+      } else {
+        queue_text(session, "There's nothing like that here to attack.");
+      }
+      return;
+    }
+    snprintf(session->character.position, sizeof(session->character.position),
+             "standing");
+    snprintf(session->target, sizeof(session->target), "%s", mob->id);
+    cJSON *start = json_object();
+    cJSON_AddStringToObject(start, "mob", mob->id);
+    cJSON_AddStringToObject(start, "name", mob->name);
+    queue_event(session, "combat.start", start);
+    queue_text(session, "You throw yourself at %s.", mob->name);
+    send_vitals(session);
+    return;
+  }
+  if (strcmp(verb, "rest") == 0) {
+    if (session->target[0] != '\0') {
+      queue_text(session, "Not while you're fighting for your life.");
+      return;
+    }
+    snprintf(session->character.position, sizeof(session->character.position),
+             "resting");
+    queue_text(session, "You settle in and rest.");
+    send_vitals(session);
+    return;
+  }
+  if (strcmp(verb, "sense") == 0 || strcmp(verb, "actions") == 0) {
+    const hg_room *room = hg_world_room(session->character.room);
+    if (room != NULL) {
+      send_actions(session, room);
+    }
+    return;
+  }
+  if (strcmp(verb, "join") == 0) {
+    cmd_join(session, server);
+    return;
+  }
+  if (strcmp(verb, "defend") == 0) {
+    cmd_defend(session, server);
+    return;
+  }
+  if (strcmp(verb, "listen") == 0) {
+    cJSON *payload = json_object();
+    cJSON_AddStringToObject(payload, "kind", "signal");
+    cJSON_AddStringToObject(
+        payload, "text",
+        "a residual field hums through dead ferrite, carrying a half-erased name");
+    queue_event(session, "grid.transmission", payload);
+    queue_text(session, "You listen. The dead network answers.");
+    return;
+  }
+  if (strcmp(verb, "ping") == 0) {
+    if (arg != NULL && strcmp(arg, "all") == 0) {
+      cJSON *payload = json_object();
+      cJSON *traces = cJSON_AddArrayToObject(payload, "traces");
+      for (size_t i = 0; i < server->trace_count; ++i) {
+        cJSON *trace = cJSON_CreateObject();
+        cJSON_AddStringToObject(trace, "world", server->traces[i].world);
+        cJSON_AddStringToObject(trace, "node", server->traces[i].node);
+        cJSON_AddStringToObject(trace, "kind", server->traces[i].kind);
+        cJSON_AddStringToObject(trace, "text", server->traces[i].text);
+        cJSON_AddItemToArray(traces, trace);
+      }
+      queue_event(session, "grid.federation", payload);
+      queue_text(session, "Federation echoes return.");
+      return;
+    }
+    cJSON *payload = json_object();
+    cJSON_AddStringToObject(payload, "node", session->character.room);
+    cJSON *traces = cJSON_AddArrayToObject(payload, "traces");
+    for (size_t i = 0; i < server->trace_count; ++i) {
+      if (strcmp(server->traces[i].node, session->character.room) != 0) {
+        continue;
+      }
+      cJSON *trace = cJSON_CreateObject();
+      cJSON_AddStringToObject(trace, "world", server->traces[i].world);
+      cJSON_AddStringToObject(trace, "node", server->traces[i].node);
+      cJSON_AddStringToObject(trace, "kind", server->traces[i].kind);
+      cJSON_AddStringToObject(trace, "text", server->traces[i].text);
+      cJSON_AddItemToArray(traces, trace);
+    }
+    queue_event(session, "grid.echo", payload);
+    queue_text(session, "This node answers.");
+    return;
+  }
+  if (strcmp(verb, "inscribe") == 0 || strcmp(verb, "carve") == 0) {
+    if (arg == NULL || arg[0] == '\0') {
+      queue_text(session, "Inscribe what?");
+      return;
+    }
+    record_trace(server, server->config->world_name, session->character.room,
+                 "mark", arg);
+    cJSON *payload = json_object();
+    cJSON_AddStringToObject(payload, "node", session->character.room);
+    cJSON_AddStringToObject(payload, "text", arg);
+    queue_event(session, "grid.inscribed", payload);
+    queue_text(session, "You carve it into the node.");
+    return;
+  }
+  if (strcmp(verb, "help") == 0) {
+    queue_text(session,
+               "Commands: look, exits, inventory, wield, remove, consider, "
+               "attack, rest, join, defend, listen, ping, sense, help.");
+    return;
+  }
+  if (strcmp(verb, "recall") == 0 || strcmp(verb, "home") == 0) {
+    session->target[0] = '\0';
+    snprintf(session->character.room, sizeof(session->character.room), "nexus");
+    snprintf(session->character.position, sizeof(session->character.position),
+             "standing");
+    send_scene(session, server);
+    return;
+  }
 
   const hg_room *room = hg_world_room(session->character.room);
   const hg_room *destination = hg_world_move(room, verb);
   if (destination != NULL) {
+    if (session->target[0] != '\0') {
+      queue_text(session, "Not while you're fighting for your life.");
+      return;
+    }
     snprintf(session->character.room, sizeof(session->character.room), "%s",
              destination->id);
+    snprintf(session->character.position, sizeof(session->character.position),
+             "standing");
     hg_store_save(&server->store, &session->character);
     send_scene(session, server);
     return;
   }
 
-  queue_text(session, "Nothing answers '%s'. Type look to read the room.", input);
+  queue_text(session, "Nothing answers '%s'. Type help for verbs.", input);
 }
 
 static void handle_command(hg_session *session, hg_server *server,
@@ -423,6 +910,30 @@ static int handle_http(struct lws *wsi, hg_server *server, const char *path) {
         now, server->config->world_name);
     return send_http_json(wsi, HTTP_STATUS_OK, body);
   }
+  if (strcmp(path, "/map.svg") == 0) {
+    static const char *svg =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"720\" height=\"480\">"
+        "<rect width=\"100%\" height=\"100%\" fill=\"#1a1410\"/>"
+        "<text x=\"24\" y=\"36\" fill=\"#e8a060\" font-family=\"monospace\" "
+        "font-size=\"18\">Ferrite Wastes</text>"
+        "<text x=\"24\" y=\"70\" fill=\"#c8dde8\" font-family=\"monospace\" "
+        "font-size=\"12\">nexus - workshop - roof - coil-yard</text>"
+        "</svg>";
+    unsigned char headers[LWS_PRE + 512];
+    unsigned char *start = &headers[LWS_PRE];
+    unsigned char *p = start;
+    unsigned char *end = &headers[sizeof(headers) - 1];
+    size_t length = strlen(svg);
+    if (lws_add_http_common_headers(wsi, HTTP_STATUS_OK, "image/svg+xml",
+                                    length, &p, end) ||
+        lws_finalize_write_http_header(wsi, start, &p, end)) {
+      return -1;
+    }
+    if (lws_write_http(wsi, svg, length) < 0) {
+      return -1;
+    }
+    return lws_http_transaction_completed(wsi) ? -1 : 0;
+  }
   snprintf(body, sizeof(body),
            "{\"ok\":false,\"error\":\"not found\",\"world\":\"%s\"}",
            server->config->world_name);
@@ -437,8 +948,7 @@ static int callback(struct lws *wsi, enum lws_callback_reasons reason,
   switch (reason) {
   case LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION: {
     char path[128];
-    int copied =
-        lws_hdr_copy(wsi, path, sizeof(path), WSI_TOKEN_GET_URI);
+    int copied = lws_hdr_copy(wsi, path, sizeof(path), WSI_TOKEN_GET_URI);
     return copied > 0 && strcmp(path, "/ws") == 0 ? 0 : 1;
   }
   case LWS_CALLBACK_HTTP:
@@ -448,8 +958,7 @@ static int callback(struct lws *wsi, enum lws_callback_reasons reason,
     session->wsi = wsi;
     session->state = HG_WAIT_NAME;
     queue_text(session, "\033[1;38;5;208mFERRITE WASTES\033[0m");
-    queue_text(session,
-               "The field is gone. What it changed remains.");
+    queue_text(session, "The field is gone. What it changed remains.");
     queue_text(session, "By what name are you known, wanderer?");
     return 0;
   case LWS_CALLBACK_RECEIVE:
@@ -466,6 +975,11 @@ static int callback(struct lws *wsi, enum lws_callback_reasons reason,
       session->input_length = 0;
     }
     return 0;
+  case LWS_CALLBACK_TIMER:
+    if (session->state == HG_PLAYING) {
+      on_tick(session, server);
+    }
+    return 0;
   case LWS_CALLBACK_SERVER_WRITEABLE:
     if (session->out_head != NULL) {
       hg_message *message = session->out_head;
@@ -475,8 +989,7 @@ static int callback(struct lws *wsi, enum lws_callback_reasons reason,
         return -1;
       }
       memcpy(buffer + LWS_PRE, message->text, length);
-      int written =
-          lws_write(wsi, buffer + LWS_PRE, length, LWS_WRITE_TEXT);
+      int written = lws_write(wsi, buffer + LWS_PRE, length, LWS_WRITE_TEXT);
       free(buffer);
       if (written < 0 || (size_t)written != length) {
         return -1;
@@ -516,6 +1029,8 @@ int hg_server_run(const hg_server_config *config) {
     fprintf(stderr, "cannot initialize data directory: %s\n", config->data_dir);
     return 1;
   }
+  hg_world_init(&server.world);
+  seed_traces(&server);
 
   struct lws_context_creation_info info;
   memset(&info, 0, sizeof(info));
@@ -532,11 +1047,11 @@ int hg_server_run(const hg_server_config *config) {
     return 1;
   }
 
-  fprintf(stdout, "%s listening on %s:%d\n", config->world_name,
-          config->host, config->port);
+  fprintf(stdout, "%s listening on %s:%d\n", config->world_name, config->host,
+          config->port);
   stop_requested = 0;
   while (!stop_requested) {
-    if (lws_service(server.context, 100) < 0) {
+    if (lws_service(server.context, 50) < 0) {
       break;
     }
   }

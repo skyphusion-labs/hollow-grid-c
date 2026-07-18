@@ -20,17 +20,21 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 - [x] `/health` + `/health/deep` with non-critical local hub check
 - [x] Upstream smoke transport gate: health, login, resume, move, and rat room green
 
-## Phase 1 -- the world (standalone)
+## Phase 1 -- the world (standalone, in progress)
 
-- [ ] Full canonical + endgame map, bestiary, items, equipment
-- [ ] Heartbeat tick: combat, regen, `world.state`
-- [ ] Moral arc: Cinder Front, ash-sworn, redemption, reckoning
+- [x] Canonical wastes + stronghold graph stubs + Coil Yard graft
+- [x] Starter inventory (`shiv`), wield/remove, `char.equipment`
+- [x] Live bestiary + 2s heartbeat combat (`consider`/`attack`/`combat.*`)
+- [x] Rest regen; `recall`/`home`
+- [x] LocalHub-style traces: `listen`, `ping`, `ping all`, `inscribe`
+- [x] Market `join`/`defend`; elf join brands ash-sworn (`valence: grave`)
+- [x] `/map.svg` stub
 - [ ] Economy: shop, tavern vices, steal/sell
-- [ ] Multiplayer: tell/reply/yell/emote, presence
+- [ ] Multiplayer: tell/reply/yell/emote, presence branding
 - [ ] Rescue: holding pit, cells, transit hub, `grid.rescued`
-- [ ] Grid commands: ping, listen, war, gridcast, witness, cache/gather
-- [ ] Persistence (SQLite)
-- [ ] `LocalHub` federation fallback + `/map.svg`
+- [ ] Full moral arc: forgiveness, redemption, reckoning, tide
+- [ ] Racial abilities, sleep/dream, title/`who`
+- [ ] Persistence (SQLite; JSON store remains for now)
 - [ ] Standalone smoke green (or documented residual fails)
 
 ## Phase 2 -- federation
@@ -52,5 +56,6 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 | Target | ok | fail | skip | Notes |
 | --- | ---: | ---: | ---: | --- |
 | Local Phase 0 (`127.0.0.1:8792`) | 36 | 115 | 2 | Transport gate green; failures are Phase 1 game, LocalHub, map, and federation features |
+| Local Phase 1a (`127.0.0.1:8792`) | 71 | 79 | 2 | Combat, equipment, wastes map, join/ashsworn, listen/ping green |
 
 **Parity targets:** Rust Choir (Go) and Verdigris Spool (Python) prod baselines on the same upstream suite.

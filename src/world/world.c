@@ -1,5 +1,6 @@
 #include "hg_world.h"
 
+#include <stdio.h>
 #include <string.h>
 
 static const hg_room rooms[] = {
@@ -19,8 +20,7 @@ static const hg_room rooms[] = {
      .name = "The Degaussed Cup",
      .description =
          "A low bar hammered together from transformer housings. People come "
-         "here to quiet the pull of what they remember. Some pay for a drink. "
-         "Some pay to stop remembering why.",
+         "here to quiet the pull of what they remember.",
      .exits = {{"east", "nexus"}},
      .exit_count = 1},
     {.id = "market",
@@ -64,26 +64,107 @@ static const hg_room rooms[] = {
      .name = "Service Tunnels",
      .description =
          "Cable trenches run beneath the Nexus. Rust water gathers around old "
-         "conduit, and a glow-rat worries at the insulation. A flooded shaft "
-         "drops deeper.",
+         "conduit. A flooded shaft drops deeper.",
      .exits = {{"up", "nexus"}, {"down", "sump"}},
-     .exit_count = 2,
-     .mobs = {{"rat", "glow-rat", 12, 12}},
-     .mob_count = 1},
+     .exit_count = 2},
     {.id = "sump",
      .name = "The Ferrite Sump",
      .description =
          "Black water turns orange where it meets exposed iron. The shaft "
-         "continues down into machinery not yet mapped.",
-     .exits = {{"up", "tunnels"}},
+         "continues down into submerged machinery.",
+     .exits = {{"up", "tunnels"}, {"down", "floodgate"}},
+     .exit_count = 2},
+    {.id = "floodgate",
+     .name = "The Floodgate",
+     .description =
+         "A sealed bulkhead groans under pressure. A stranded operator waits "
+         "beside a dead console, watching the cold storage racks beyond.",
+     .exits = {{"up", "sump"}, {"north", "coldrow"}},
+     .exit_count = 2},
+    {.id = "coldrow",
+     .name = "Cold Storage Row",
+     .description =
+         "Racks of dead drives sweat condensation. Something pale moves between "
+         "the cabinets, feeding on residual current.",
+     .exits = {{"south", "floodgate"}},
      .exit_count = 1},
     {.id = "dunes",
      .name = "The Black Powder Flats",
      .description =
          "Ferrite dust combs itself into ridges under a field too weak to "
-         "measure and too persistent to ignore. The roof lies south.",
+         "measure and too persistent to ignore. The roof lies south; Scorch "
+         "Road runs east.",
      .outdoors = 1,
-     .exits = {{"south", "roof"}},
+     .exits = {{"south", "roof"},
+               {"east", "scorch_road"},
+               {"north", "checkpoint"}},
+     .exit_count = 3},
+    {.id = "scorch_road",
+     .name = "Scorch Road",
+     .description =
+         "A highway the sun has been working on for a long time. Heat-shimmer "
+         "crawls off the tar. The flats lie west; a waystation flag snaps to "
+         "the east; an abandoned transit hub opens south.",
+     .outdoors = 1,
+     .exits = {{"west", "dunes"},
+               {"east", "waystation"},
+               {"south", "transit_hub"}},
+     .exit_count = 3},
+    {.id = "waystation",
+     .name = "Refugee Waystation",
+     .description =
+         "A huddle of tarps and water-drums where free folk catch their breath. "
+         "Eyes track every newcomer, weighing which side they came in on.",
+     .outdoors = 1,
+     .exits = {{"west", "scorch_road"}},
+     .exit_count = 1},
+    {.id = "transit_hub",
+     .name = "The Old Transit Hub",
+     .description =
+         "Collapsed platforms and silent rails. Distress banners still hang "
+         "from rusted girders.",
+     .exits = {{"north", "scorch_road"}},
+     .exit_count = 1},
+    {.id = "checkpoint",
+     .name = "The Ash Checkpoint",
+     .description =
+         "The Cinder Front's first wall. Ash-grey troopers watch the road and "
+         "the people on it.",
+     .outdoors = 1,
+     .exits = {{"south", "dunes"}, {"north", "gate"}},
+     .exit_count = 2},
+    {.id = "gate",
+     .name = "The Stronghold Gate",
+     .description =
+         "Reinforced plating and welded scrap form a throat into the Front's "
+         "yard. Beyond, drills and orders carry on the wind.",
+     .exits = {{"south", "checkpoint"}, {"north", "muster"}},
+     .exit_count = 2},
+    {.id = "muster",
+     .name = "The Muster Yard",
+     .description =
+         "Drilled Front troopers form and reform under ash banners. Cages sit "
+         "to the west; the war room waits north.",
+     .exits = {{"south", "gate"}, {"west", "cells"}, {"north", "warroom"}},
+     .exit_count = 3},
+    {.id = "cells",
+     .name = "The Holding Cells",
+     .description =
+         "Iron cages bolted into concrete. Some are empty. Some are waiting.",
+     .exits = {{"east", "muster"}},
+     .exit_count = 1},
+    {.id = "warroom",
+     .name = "The War Room",
+     .description =
+         "Maps of the wastes cover a steel table. The dais opens above.",
+     .exits = {{"south", "muster"}, {"up", "dais"}},
+     .exit_count = 2},
+    {.id = "dais",
+     .name = "The Ashmonger's Dais",
+     .description =
+         "A raised platform of welded scrap and ash. The commander of the "
+         "Cinder Front holds court here.",
+     .exits = {{"down", "warroom"}},
      .exit_count = 1},
     {.id = "coil-yard",
      .name = "The Coil Yard",
@@ -131,6 +212,51 @@ static const hg_room rooms[] = {
      .action_count = 1},
 };
 
+static void seed_mob(hg_world_state *state, const char *id, const char *name,
+                     const char *description, const char *room, int max_hp,
+                     int damage, int xp, int respawn_ms) {
+  if (state->mob_count >= HG_MAX_LIVE_MOBS) {
+    return;
+  }
+  hg_live_mob *mob = &state->mobs[state->mob_count++];
+  memset(mob, 0, sizeof(*mob));
+  snprintf(mob->id, sizeof(mob->id), "%s", id);
+  snprintf(mob->name, sizeof(mob->name), "%s", name);
+  snprintf(mob->description, sizeof(mob->description), "%s", description);
+  snprintf(mob->room, sizeof(mob->room), "%s", room);
+  mob->hp = max_hp;
+  mob->max_hp = max_hp;
+  mob->damage = damage;
+  mob->xp = xp;
+  mob->alive = 1;
+  mob->respawn_ms = respawn_ms;
+}
+
+void hg_world_init(hg_world_state *state) {
+  memset(state, 0, sizeof(*state));
+  state->started = time(NULL);
+  seed_mob(state, "rat", "a glow-rat",
+           "A bloated rodent, fur matted and faintly luminous with absorbed "
+           "rads.",
+           "tunnels", 12, 4, 8, 20000);
+  seed_mob(state, "raider", "a wastes raider",
+           "A scarred figure wrapped in sun-bleached rags and scavenged plate.",
+           "scorch_road", 22, 6, 20, 40000);
+  seed_mob(state, "warden", "the warden",
+           "A chrome-masked jailer, broad as a doorway.", "holding_pit", 18, 5,
+           40, 60000);
+  seed_mob(state, "leech", "a data-leech",
+           "A pale, boneless thing clamped to a live rack, swollen with stolen "
+           "current.",
+           "coldrow", 18, 5, 16, 30000);
+  seed_mob(state, "trooper", "a Cinder Front trooper",
+           "A drilled Front soldier in matched ash-grey gear.", "muster", 30, 6,
+           28, 60000);
+  seed_mob(state, "ashmonger", "the Ashmonger",
+           "The commander of the Cinder Front, ash-crowned and certain.",
+           "dais", 80, 12, 200, 0);
+}
+
 const hg_room *hg_world_start(void) { return hg_world_room("nexus"); }
 
 const hg_room *hg_world_room(const char *id) {
@@ -153,4 +279,52 @@ const hg_room *hg_world_move(const hg_room *from, const char *direction) {
     }
   }
   return NULL;
+}
+
+hg_live_mob *hg_world_mob_in_room(hg_world_state *state, const char *room_id,
+                                  const char *mob_id) {
+  if (state == NULL || room_id == NULL || mob_id == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < state->mob_count; ++i) {
+    hg_live_mob *mob = &state->mobs[i];
+    if (mob->alive && strcmp(mob->room, room_id) == 0 &&
+        strcmp(mob->id, mob_id) == 0) {
+      return mob;
+    }
+  }
+  return NULL;
+}
+
+size_t hg_world_mobs_in_room(hg_world_state *state, const char *room_id,
+                             hg_live_mob **out, size_t out_cap) {
+  size_t found = 0;
+  if (state == NULL || room_id == NULL) {
+    return 0;
+  }
+  for (size_t i = 0; i < state->mob_count && found < out_cap; ++i) {
+    hg_live_mob *mob = &state->mobs[i];
+    if (mob->alive && strcmp(mob->room, room_id) == 0) {
+      out[found++] = mob;
+    }
+  }
+  return found;
+}
+
+void hg_world_tick_respawns(hg_world_state *state) {
+  if (state == NULL) {
+    return;
+  }
+  time_t now = time(NULL);
+  for (size_t i = 0; i < state->mob_count; ++i) {
+    hg_live_mob *mob = &state->mobs[i];
+    if (mob->alive || mob->respawn_ms <= 0 || mob->died_at == 0) {
+      continue;
+    }
+    if ((now - mob->died_at) * 1000 >= mob->respawn_ms) {
+      mob->hp = mob->max_hp;
+      mob->alive = 1;
+      mob->died_at = 0;
+    }
+  }
 }
