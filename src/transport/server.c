@@ -85,6 +85,8 @@ typedef struct {
 #define HG_MAX_FALLEN 64
 #define HG_MAX_ADMINS 8
 #define HG_MAX_KEPT 128
+#define HG_MAX_CASTS 64
+#define HG_MAX_WORLDS 8
 
 typedef struct {
   char room[32];
@@ -102,6 +104,19 @@ typedef struct {
   char keeper[33];
   char fallen[33];
 } hg_kept_pair;
+
+typedef struct {
+  int id;
+  char world[48];
+  char sender[33];
+  char text[240];
+} hg_cast;
+
+typedef struct {
+  char id[48];
+  char url[160];
+  long long last_seen_ms;
+} hg_world_info;
 
 typedef struct hg_session {
   struct lws *wsi;
@@ -148,6 +163,13 @@ typedef struct {
   size_t kept_count;
   char admins[HG_MAX_ADMINS][33];
   size_t admin_count;
+  hg_cast casts[HG_MAX_CASTS];
+  size_t cast_count;
+  int next_cast_id;
+  int last_cast_id;
+  hg_world_info worlds[HG_MAX_WORLDS];
+  size_t world_count;
+  time_t last_fed_poll;
 } hg_server;
 
 static const char *k_refugee_names[] = {
@@ -176,6 +198,8 @@ static int take_cache(hg_server *server, const char *room);
 static void parse_admins(hg_server *server, const char *list);
 static int find_inventory(const hg_character *character, const char *arg,
                           char *out_id, size_t out_size);
+static void seed_worlds(hg_server *server);
+static void poll_gridcasts(hg_server *server);
 
 static void free_messages(hg_session *session) {
   while (session->out_head != NULL) {
@@ -259,6 +283,75 @@ static void seed_traces(hg_server *server) {
                "salt wind carried a name nobody claimed");
   record_trace(server, "Rust Choir", "grid-gate", "recall",
                "the Memorial Static scrolled a forgotten oath");
+  record_trace(server, "Saltreach", "the drowned pier", "death",
+               "a runner called Mox bled out, cursing the tide.");
+  record_trace(server, "Dustfall", "the long market", "slain",
+               "a trader put down a chrome-jackal with a length of pipe.");
+}
+
+static void seed_worlds(hg_server *server) {
+  long long now = (long long)time(NULL) * 1000;
+  const char *url = server->config->world_url;
+  if (url == NULL || url[0] == '\0') {
+    url = "ws://127.0.0.1:8792/ws";
+  }
+  server->world_count = 0;
+  snprintf(server->worlds[0].id, sizeof(server->worlds[0].id), "Saltreach");
+  snprintf(server->worlds[0].url, sizeof(server->worlds[0].url),
+           "wss://saltreach.example/ws");
+  server->worlds[0].last_seen_ms = 0;
+  server->world_count++;
+  snprintf(server->worlds[1].id, sizeof(server->worlds[1].id), "Dustfall");
+  snprintf(server->worlds[1].url, sizeof(server->worlds[1].url),
+           "wss://dustfall.skyphusion.org/ws");
+  server->worlds[1].last_seen_ms = now;
+  server->world_count++;
+  snprintf(server->worlds[2].id, sizeof(server->worlds[2].id), "%s",
+           server->config->world_name);
+  snprintf(server->worlds[2].url, sizeof(server->worlds[2].url), "%s", url);
+  server->worlds[2].last_seen_ms = now;
+  server->world_count++;
+}
+
+static void poll_gridcasts(hg_server *server) {
+  time_t now = time(NULL);
+  if (server->last_fed_poll != 0 && now - server->last_fed_poll < 2) {
+    return;
+  }
+  server->last_fed_poll = now;
+  int max_id = server->last_cast_id;
+  for (size_t i = 0; i < server->cast_count; ++i) {
+    const hg_cast *cast = &server->casts[i];
+    if (cast->id <= server->last_cast_id) {
+      continue;
+    }
+    if (cast->id > max_id) {
+      max_id = cast->id;
+    }
+    cJSON *payload = json_object();
+    cJSON_AddStringToObject(payload, "world", cast->world);
+    cJSON_AddStringToObject(payload, "from", cast->sender);
+    cJSON_AddStringToObject(payload, "text", cast->text);
+    char *event_line = hg_event_line("comm.gridcast", payload);
+    for (hg_session *other = server->sessions; other != NULL;
+         other = other->next) {
+      if (other->state != HG_PLAYING) {
+        continue;
+      }
+      queue_text(other, "[Grid] [%s] %s: %s", cast->world, cast->sender,
+                 cast->text);
+      if (event_line != NULL) {
+        size_t len = strlen(event_line);
+        char *copy = malloc(len + 1);
+        if (copy != NULL) {
+          memcpy(copy, event_line, len + 1);
+          queue_owned(other, copy);
+        }
+      }
+    }
+    free(event_line);
+  }
+  server->last_cast_id = max_id;
 }
 
 static int cages_ready(const hg_server *server, const char *room_id) {
@@ -1742,6 +1835,156 @@ static void cmd_war(hg_session *session, hg_server *server) {
   queue_event(session, "world.war", payload);
 }
 
+static void cmd_gridcast(hg_session *session, hg_server *server, const char *arg) {
+  if (arg == NULL || arg[0] == '\0') {
+    queue_text(session,
+               "Gridcast what? (gridcast <message> -- the dead network carries "
+               "it to every world)");
+    return;
+  }
+  if (server->cast_count >= HG_MAX_CASTS) {
+    memmove(&server->casts[0], &server->casts[1],
+            sizeof(server->casts[0]) * (HG_MAX_CASTS - 1));
+    server->cast_count = HG_MAX_CASTS - 1;
+  }
+  server->next_cast_id++;
+  hg_cast *cast = &server->casts[server->cast_count++];
+  cast->id = server->next_cast_id;
+  snprintf(cast->world, sizeof(cast->world), "%s", server->config->world_name);
+  snprintf(cast->sender, sizeof(cast->sender), "%s", session->character.name);
+  snprintf(cast->text, sizeof(cast->text), "%s", arg);
+  server->last_fed_poll = 0;
+  queue_text(session,
+             "You cast your voice into the dead Grid, out across every node: "
+             "\"%s\"",
+             arg);
+}
+
+static void cmd_whoami(hg_session *session) {
+  const hg_character *c = &session->character;
+  cJSON *payload = json_object();
+  cJSON_AddNumberToObject(payload, "level", c->level);
+  cJSON_AddNumberToObject(payload, "xp", c->xp);
+  cJSON_AddNumberToObject(payload, "gold", c->gold);
+  cJSON_AddStringToObject(payload, "faction", c->faction);
+  cJSON_AddNumberToObject(payload, "morality", c->morality);
+  cJSON_AddStringToObject(payload, "title", c->title);
+  cJSON_AddStringToObject(payload, "race", c->race);
+  cJSON_AddBoolToObject(payload, "ashsworn", c->ashsworn);
+  cJSON_AddBoolToObject(payload, "strayed", c->strayed);
+  cJSON_AddBoolToObject(payload, "redeemed", c->redeemed);
+  queue_event(session, "char.identity", payload);
+  const char *stand = "unproven";
+  if (c->morality >= 25) {
+    stand = "of the free folk";
+  } else if (c->morality <= -25 || strcmp(c->faction, "front") == 0) {
+    stand = "of the Cinder Front";
+  } else if (c->morality > 0) {
+    stand = "leaning toward the light";
+  } else if (c->morality < 0) {
+    stand = "leaning toward the cinder";
+  }
+  queue_text(session, "The Grid reads you back: %s, level %d, %s.", c->race,
+             c->level, stand);
+}
+
+static void cmd_worlds(hg_session *session, hg_server *server) {
+  long long now = (long long)time(NULL) * 1000;
+  cJSON *payload = json_object();
+  cJSON *rows = cJSON_AddArrayToObject(payload, "worlds");
+  queue_text(session, "Worlds linked on the Grid (say 'travel <world>'):");
+  for (size_t i = 0; i < server->world_count; ++i) {
+    const hg_world_info *w = &server->worlds[i];
+    int reachable = w->last_seen_ms > 0;
+    int active = w->last_seen_ms > now - 60000;
+    int here = strcmp(w->id, server->config->world_name) == 0;
+    const char *tag = "seeded (not yet live)";
+    if (here) {
+      tag = "you are here";
+    } else if (reachable && active) {
+      tag = "reachable, active now";
+    } else if (reachable) {
+      tag = "reachable, quiet";
+    }
+    queue_text(session, "  %s  [%s]", w->id, tag);
+    cJSON *row = cJSON_CreateObject();
+    cJSON_AddStringToObject(row, "id", w->id);
+    cJSON_AddBoolToObject(row, "reachable", reachable);
+    cJSON_AddBoolToObject(row, "active", active);
+    cJSON_AddNumberToObject(row, "lastSeen", (double)w->last_seen_ms);
+    cJSON_AddBoolToObject(row, "here", here);
+    cJSON_AddItemToArray(rows, row);
+  }
+  queue_event(session, "grid.worlds", payload);
+}
+
+static int cmd_travel(hg_session *session, hg_server *server, const char *arg) {
+  if (arg == NULL || arg[0] == '\0') {
+    queue_text(session, "Travel where? (say 'worlds' to see the Grid)");
+    return 0;
+  }
+  if (session->target[0] != '\0') {
+    queue_text(session,
+               "You can't key out through the Grid in the middle of a fight.");
+    return 0;
+  }
+  char needle[64];
+  snprintf(needle, sizeof(needle), "%s", arg);
+  for (char *p = needle; *p != '\0'; ++p) {
+    *p = (char)tolower((unsigned char)*p);
+  }
+  const hg_world_info *dest = NULL;
+  for (size_t i = 0; i < server->world_count; ++i) {
+    if (strcasecmp(server->worlds[i].id, arg) == 0) {
+      dest = &server->worlds[i];
+      break;
+    }
+  }
+  if (dest == NULL) {
+    for (size_t i = 0; i < server->world_count; ++i) {
+      char id_lower[48];
+      snprintf(id_lower, sizeof(id_lower), "%s", server->worlds[i].id);
+      for (char *p = id_lower; *p != '\0'; ++p) {
+        *p = (char)tolower((unsigned char)*p);
+      }
+      if (strstr(id_lower, needle) != NULL) {
+        dest = &server->worlds[i];
+        break;
+      }
+    }
+  }
+  if (dest == NULL) {
+    queue_text(session,
+               "No world called \"%s\" answers on the Grid. (try 'worlds')",
+               arg);
+    return 0;
+  }
+  if (strcmp(dest->id, server->config->world_name) == 0) {
+    queue_text(session, "You're already in %s.", server->config->world_name);
+    return 0;
+  }
+  hg_store_save(&server->store, &session->character);
+  broadcast_room(server, session->character.room, session->character.name,
+                 "%s keys into the Grid and is routed away, off the edge of "
+                 "the world.",
+                 session->character.name);
+  queue_text(session,
+             "The Grid takes you apart, packet by packet, and routes you toward "
+             "%s.",
+             dest->id);
+  queue_text(session,
+             "Reconnect there and you arrive as yourself -- your name, level, "
+             "and standing all travel with you:");
+  queue_text(session, "    %s", dest->url);
+  queue_text(session,
+             "(This world is letting you go. See you on the other side.)");
+  cJSON *payload = json_object();
+  cJSON_AddStringToObject(payload, "to", dest->id);
+  cJSON_AddStringToObject(payload, "url", dest->url);
+  queue_event(session, "grid.travel", payload);
+  return 1;
+}
+
 static int parse_leading_int(const char *arg) {
   if (arg == NULL) {
     return -1;
@@ -3046,6 +3289,22 @@ static void handle_play(hg_session *session, hg_server *server, char *input) {
     cmd_war(session, server);
     return;
   }
+  if (strcmp(verb, "gridcast") == 0 || strcmp(verb, "gc") == 0) {
+    cmd_gridcast(session, server, arg != NULL ? arg : "");
+    return;
+  }
+  if (strcmp(verb, "whoami") == 0 || strcmp(verb, "identity") == 0) {
+    cmd_whoami(session);
+    return;
+  }
+  if (strcmp(verb, "worlds") == 0) {
+    cmd_worlds(session, server);
+    return;
+  }
+  if (strcmp(verb, "travel") == 0) {
+    (void)cmd_travel(session, server, arg != NULL ? arg : "");
+    return;
+  }
   if (strcmp(verb, "wall") == 0) {
     cmd_wall(session, server, arg != NULL ? arg : "");
     return;
@@ -3542,6 +3801,7 @@ int hg_server_run(const hg_server_config *config) {
   parse_admins(&server, config->admins);
   hg_world_init(&server.world);
   seed_traces(&server);
+  seed_worlds(&server);
   srand((unsigned)time(NULL));
 
   struct lws_context_creation_info info;
@@ -3563,6 +3823,7 @@ int hg_server_run(const hg_server_config *config) {
           config->port);
   stop_requested = 0;
   while (!stop_requested) {
+    poll_gridcasts(&server);
     if (lws_service(server.context, 50) < 0) {
       break;
     }
