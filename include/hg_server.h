@@ -6,6 +6,7 @@ typedef struct {
   int port;
   const char *world_name;
   const char *data_dir;
+  const char *admins;
 } hg_server_config;
 
 int hg_server_run(const hg_server_config *config);

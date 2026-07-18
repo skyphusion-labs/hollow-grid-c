@@ -36,7 +36,8 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 - [x] Economy: tinker `list`/`buy`, tavern `buy dust`/`use dust`, market `sell`
 - [x] Racial abilities (Human Requisition + cooldown), `title`, `who`/`grid.who`
 - [x] Full moral arc: stray/return, forgive, dais defy, reckoning, local tide/`war`
-- [ ] Wall/cache/gather, waystation treat, witness, give
+- [x] Support surface: wall, cache/gather, give, treat, witness, listen echoes,
+      local gridstats/gridprune
 - [ ] Persistence (SQLite; JSON store remains for now)
 - [ ] Standalone smoke green (or documented residual fails)
 
@@ -64,5 +65,9 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 | Local Phase 1c (`127.0.0.1:8792`) | 95 | 58 | 1 | Rescue: holding pit grace, cells, transit hub, rescued roll, personal dream |
 | Local Phase 1d (`127.0.0.1:8792`) | 108 | 45 | 1 | Economy + identity: shop, buy dust, ability, title, who |
 | Local Phase 1e (`127.0.0.1:8792`) | 126 | 27 | 1 | Moral arc: stray/return, forgive, defy, reckoning, local tide |
+| Local Phase 1f (`127.0.0.1:8792`) | 146 | 7 | 1 | Support: wall, cache/gather, give, treat, witness, listen echo, ledger |
 
 **Parity targets:** Rust Choir (Go) and Verdigris Spool (Python) prod baselines on the same upstream suite.
+
+Residual standalone fails after Phase 1f are federation-only (gridcast, whoami hub
+identity, worlds registry, travel). Next work is Phase 2 Remote Grid Hub.

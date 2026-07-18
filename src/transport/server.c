@@ -81,6 +81,28 @@ typedef struct {
   size_t kind_count;
 } hg_deed_book;
 
+#define HG_MAX_CACHE_ROOMS 32
+#define HG_MAX_FALLEN 64
+#define HG_MAX_ADMINS 8
+#define HG_MAX_KEPT 128
+
+typedef struct {
+  char room[32];
+  int gold;
+} hg_room_cache;
+
+typedef struct {
+  char name[33];
+  char world[48];
+  char room[32];
+  time_t at;
+} hg_fallen_entry;
+
+typedef struct {
+  char keeper[33];
+  char fallen[33];
+} hg_kept_pair;
+
 typedef struct hg_session {
   struct lws *wsi;
   hg_session_state state;
@@ -89,6 +111,7 @@ typedef struct hg_session {
   char reply_to[33];
   int market_resolved;
   time_t trait_ready_at;
+  time_t treat_ready_at;
   hg_message *out_head;
   hg_message *out_tail;
   char input[512];
@@ -117,6 +140,14 @@ typedef struct {
   size_t forgiven_count;
   hg_deed_book deeds[HG_MAX_DEED_PLAYERS];
   size_t deed_player_count;
+  hg_room_cache caches[HG_MAX_CACHE_ROOMS];
+  size_t cache_count;
+  hg_fallen_entry fallen[HG_MAX_FALLEN];
+  size_t fallen_count;
+  hg_kept_pair kept[HG_MAX_KEPT];
+  size_t kept_count;
+  char admins[HG_MAX_ADMINS][33];
+  size_t admin_count;
 } hg_server;
 
 static const char *k_refugee_names[] = {
@@ -135,6 +166,16 @@ static const char *race_ids[] = {"human", "elf",    "revenant", "ghoul",
 static const char *race_names[] = {"Human", "Elf",    "Revenant", "Ghoul",
                                    "Chromed", "Dustkin", "Vatborn"};
 static const size_t race_count = sizeof(race_ids) / sizeof(race_ids[0]);
+
+static const char *mood_for_tide(int tide);
+static void announce_cache_if_any(hg_session *session, hg_server *server);
+static int is_admin(const hg_server *server, const char *name);
+static int cache_gold(const hg_server *server, const char *room);
+static void add_cache(hg_server *server, const char *room, int amount);
+static int take_cache(hg_server *server, const char *room);
+static void parse_admins(hg_server *server, const char *list);
+static int find_inventory(const hg_character *character, const char *arg,
+                          char *out_id, size_t out_size);
 
 static void free_messages(hg_session *session) {
   while (session->out_head != NULL) {
@@ -699,6 +740,25 @@ static void send_actions(hg_session *session, hg_server *server,
       cJSON_AddItemToArray(actions, defy);
     }
   }
+  if (strcmp(room->id, "waystation") == 0) {
+    cJSON *witness = cJSON_CreateObject();
+    cJSON_AddStringToObject(witness, "verb", "witness");
+    cJSON_AddStringToObject(witness, "label",
+                            "hold a vigil for the fallen (memory is resistance)");
+    cJSON_AddStringToObject(witness, "kind", "moral");
+    cJSON_AddStringToObject(witness, "valence", "virtuous");
+    cJSON_AddItemToArray(actions, witness);
+    if (strcmp(mood_for_tide(server->tide), "falling") != 0) {
+      cJSON *treat = cJSON_CreateObject();
+      cJSON_AddStringToObject(treat, "verb", "treat");
+      cJSON_AddStringToObject(
+          treat, "label",
+          "let the waystation medic treat your wounds (free, while the free "
+          "folk hold)");
+      cJSON_AddStringToObject(treat, "kind", "social");
+      cJSON_AddItemToArray(actions, treat);
+    }
+  }
   queue_event(session, "room.actions", payload);
 }
 
@@ -775,6 +835,7 @@ static void send_scene(hg_session *session, hg_server *server) {
   send_vitals(session);
   send_affects(session);
   send_actions(session, server, room);
+  announce_cache_if_any(session, server);
 }
 
 static void send_creation_menu(hg_session *session) {
@@ -955,6 +1016,24 @@ static void combat_round(hg_session *session, hg_server *server) {
   }
 
   if (session->character.hp <= 0) {
+    char death_room[32];
+    snprintf(death_room, sizeof(death_room), "%s", session->character.room);
+    if (server->fallen_count >= HG_MAX_FALLEN) {
+      server->fallen_count = HG_MAX_FALLEN - 1;
+    }
+    if (server->fallen_count > 0) {
+      memmove(&server->fallen[1], &server->fallen[0],
+              sizeof(server->fallen[0]) * server->fallen_count);
+    }
+    snprintf(server->fallen[0].name, sizeof(server->fallen[0].name), "%s",
+             session->character.name);
+    snprintf(server->fallen[0].world, sizeof(server->fallen[0].world), "%s",
+             server->config->world_name);
+    snprintf(server->fallen[0].room, sizeof(server->fallen[0].room), "%s",
+             death_room);
+    server->fallen[0].at = time(NULL);
+    server->fallen_count++;
+
     session->character.hp = session->character.max_hp;
     snprintf(session->character.room, sizeof(session->character.room), "nexus");
     snprintf(session->character.position, sizeof(session->character.position),
@@ -1027,6 +1106,110 @@ static void contribute_tide(hg_server *server, int delta) {
   }
   if (server->tide < HG_TIDE_FLOOR) {
     server->tide = HG_TIDE_FLOOR;
+  }
+}
+
+static int is_admin(const hg_server *server, const char *name) {
+  for (size_t i = 0; i < server->admin_count; ++i) {
+    if (strcasecmp(server->admins[i], name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static const char *mood_for_tide(int tide) {
+  if (tide >= 40) {
+    return "rising";
+  }
+  if (tide <= -40) {
+    return "falling";
+  }
+  return "still";
+}
+
+static int cache_gold(const hg_server *server, const char *room) {
+  for (size_t i = 0; i < server->cache_count; ++i) {
+    if (strcmp(server->caches[i].room, room) == 0) {
+      return server->caches[i].gold;
+    }
+  }
+  return 0;
+}
+
+static void add_cache(hg_server *server, const char *room, int amount) {
+  for (size_t i = 0; i < server->cache_count; ++i) {
+    if (strcmp(server->caches[i].room, room) == 0) {
+      server->caches[i].gold += amount;
+      return;
+    }
+  }
+  if (server->cache_count >= HG_MAX_CACHE_ROOMS) {
+    return;
+  }
+  snprintf(server->caches[server->cache_count].room,
+           sizeof(server->caches[server->cache_count].room), "%s", room);
+  server->caches[server->cache_count].gold = amount;
+  server->cache_count++;
+}
+
+static int take_cache(hg_server *server, const char *room) {
+  for (size_t i = 0; i < server->cache_count; ++i) {
+    if (strcmp(server->caches[i].room, room) == 0) {
+      int gold = server->caches[i].gold;
+      server->caches[i].gold = 0;
+      return gold;
+    }
+  }
+  return 0;
+}
+
+static void announce_cache_if_any(hg_session *session, hg_server *server) {
+  int gold = cache_gold(server, session->character.room);
+  if (gold <= 0) {
+    return;
+  }
+  queue_text(session,
+             "Someone has cached aid here: %d gold, left for whoever comes next. "
+             "(gather)",
+             gold);
+  cJSON *payload = json_object();
+  cJSON_AddNumberToObject(payload, "gold", gold);
+  queue_event(session, "node.cache", payload);
+}
+
+static void parse_admins(hg_server *server, const char *list) {
+  if (list == NULL || list[0] == '\0') {
+    snprintf(server->admins[0], sizeof(server->admins[0]), "skyphusion");
+    server->admin_count = 1;
+    return;
+  }
+  const char *cursor = list;
+  while (*cursor != '\0' && server->admin_count < HG_MAX_ADMINS) {
+    while (*cursor == ' ' || *cursor == ',') {
+      ++cursor;
+    }
+    if (*cursor == '\0') {
+      break;
+    }
+    const char *start = cursor;
+    while (*cursor != '\0' && *cursor != ',') {
+      ++cursor;
+    }
+    const char *end = cursor;
+    while (end > start && end[-1] == ' ') {
+      --end;
+    }
+    size_t len = (size_t)(end - start);
+    if (len > 0 && len < sizeof(server->admins[0])) {
+      memcpy(server->admins[server->admin_count], start, len);
+      server->admins[server->admin_count][len] = '\0';
+      server->admin_count++;
+    }
+  }
+  if (server->admin_count == 0) {
+    snprintf(server->admins[0], sizeof(server->admins[0]), "skyphusion");
+    server->admin_count = 1;
   }
 }
 
@@ -1557,6 +1740,444 @@ static void cmd_war(hg_session *session, hg_server *server) {
   cJSON *payload = json_object();
   cJSON_AddNumberToObject(payload, "tide", tide);
   queue_event(session, "world.war", payload);
+}
+
+static int parse_leading_int(const char *arg) {
+  if (arg == NULL) {
+    return -1;
+  }
+  while (*arg == ' ') {
+    ++arg;
+  }
+  if (*arg < '0' || *arg > '9') {
+    return -1;
+  }
+  char *end = NULL;
+  long value = strtol(arg, &end, 10);
+  if (end == arg || value < 1 || value > 1000000) {
+    return -1;
+  }
+  return (int)value;
+}
+
+static void cmd_wall(hg_session *session, hg_server *server, const char *arg) {
+  if (!is_admin(server, session->character.name)) {
+    queue_text(session, "Only a keeper of the Grid can broadcast across the wastes.");
+    return;
+  }
+  if (arg == NULL || arg[0] == '\0') {
+    queue_text(session, "Announce what?  (wall <message>)");
+    return;
+  }
+  cJSON *payload = json_object();
+  cJSON_AddStringToObject(payload, "from", session->character.name);
+  cJSON_AddStringToObject(payload, "text", arg);
+  char *event_line = hg_event_line("server.announce", payload);
+  for (hg_session *other = server->sessions; other != NULL; other = other->next) {
+    if (other->state != HG_PLAYING) {
+      continue;
+    }
+    queue_text(other, "*** GRID BROADCAST ***  %s", arg);
+    if (event_line != NULL) {
+      char *copy = strdup(event_line);
+      if (copy != NULL) {
+        queue_owned(other, copy);
+      }
+    }
+  }
+  free(event_line);
+}
+
+static void cmd_cache(hg_session *session, hg_server *server, const char *arg) {
+  int amount = parse_leading_int(arg);
+  if (amount < 1) {
+    queue_text(session,
+               "Cache how much?  (cache <gold> -- leave it here for whoever "
+               "comes next)");
+    return;
+  }
+  if (session->character.gold < amount) {
+    queue_text(session, "You don't have %d gold to give. (you have %d)", amount,
+               session->character.gold);
+    return;
+  }
+  session->character.gold -= amount;
+  add_cache(server, session->character.room, amount);
+  shift_morality(session, 2);
+  add_deed(server, session->character.name, "aided");
+  hg_store_save(&server->store, &session->character);
+  char text[160];
+  snprintf(text, sizeof(text), "%s left aid here for whoever comes next.",
+           session->character.name);
+  record_trace(server, server->config->world_name, session->character.room,
+               "aid", text);
+  queue_text(session,
+             "You tuck %d gold into a hollow where the next traveler will find "
+             "it. They'll never know your name. You do it anyway.",
+             amount);
+  send_vitals(session);
+  send_affects(session);
+}
+
+static void cmd_gather(hg_session *session, hg_server *server) {
+  int here = take_cache(server, session->character.room);
+  if (here <= 0) {
+    queue_text(session,
+               "There's nothing cached here. If you have something to spare, "
+               "you could change that. (cache <gold>)");
+    return;
+  }
+  session->character.gold += here;
+  hg_store_save(&server->store, &session->character);
+  queue_text(session,
+             "You find %d gold someone cached here. Wherever they are, they "
+             "meant it for a stranger; tonight that's you. (gold: %d)",
+             here, session->character.gold);
+  send_vitals(session);
+}
+
+static void cmd_give(hg_session *session, hg_server *server, const char *arg) {
+  if (arg == NULL || arg[0] == '\0') {
+    queue_text(session, "Give what to whom?  (give <item> <player>)");
+    return;
+  }
+  char buf[160];
+  snprintf(buf, sizeof(buf), "%s", arg);
+  char *tokens[8];
+  size_t n = 0;
+  char *cursor = buf;
+  while (*cursor != '\0' && n < 8) {
+    while (*cursor == ' ') {
+      ++cursor;
+    }
+    if (*cursor == '\0') {
+      break;
+    }
+    tokens[n++] = cursor;
+    while (*cursor != '\0' && *cursor != ' ') {
+      ++cursor;
+    }
+    if (*cursor != '\0') {
+      *cursor = '\0';
+      ++cursor;
+    }
+  }
+  if (n < 2) {
+    queue_text(session, "Give what to whom?  (give <item> <player>)");
+    return;
+  }
+  const char *who = tokens[n - 1];
+  size_t item_n = n - 1;
+  if (item_n > 0 && strcasecmp(tokens[item_n - 1], "to") == 0) {
+    item_n--;
+  }
+  if (item_n == 0) {
+    queue_text(session, "Give what to whom?  (give <item> <player>)");
+    return;
+  }
+  char item_arg[96] = "";
+  size_t used = 0;
+  for (size_t i = 0; i < item_n; ++i) {
+    int written =
+        snprintf(item_arg + used, sizeof(item_arg) - used, "%s%s",
+                 i == 0 ? "" : " ", tokens[i]);
+    if (written < 0 || (size_t)written >= sizeof(item_arg) - used) {
+      break;
+    }
+    used += (size_t)written;
+  }
+  char item_id[16];
+  if (find_inventory(&session->character, item_arg, item_id, sizeof(item_id)) !=
+      0) {
+    queue_text(session, "You aren't carrying \"%s\".", item_arg);
+    return;
+  }
+  hg_session *target = session_find(server, who);
+  if (target == NULL ||
+      strcmp(target->character.room, session->character.room) != 0 ||
+      strcasecmp(target->character.name, session->character.name) == 0) {
+    queue_text(session, "There's no one called \"%s\" here to give it to.", who);
+    return;
+  }
+  if (hg_character_add_item(&target->character, item_id) != 0) {
+    queue_text(session, "%s can't carry any more.", target->character.name);
+    return;
+  }
+  hg_character_remove_item(&session->character, item_id);
+  hg_store_save(&server->store, &session->character);
+  hg_store_save(&server->store, &target->character);
+  queue_text(session, "You give %s to %s.", hg_item_name(item_id),
+             target->character.name);
+  queue_text(target, "%s gives you %s.", session->character.name,
+             hg_item_name(item_id));
+}
+
+static void cmd_treat(hg_session *session, hg_server *server) {
+  if (strcmp(session->character.room, "waystation") != 0) {
+    queue_text(session,
+               "There's no medic here. The free folk keep their triage cot at "
+               "the waystation, off the Scorch Road.");
+    return;
+  }
+  if (session->target[0] != '\0') {
+    queue_text(session, "Not in the middle of a fight.");
+    return;
+  }
+  if (strcmp(session->character.faction, "front") == 0 ||
+      session->character.ashsworn) {
+    queue_text(session,
+               "The waystation medic looks at your brand and turns their back. "
+               "There is no care to be had here for your kind.");
+    return;
+  }
+  const char *mood = mood_for_tide(server->tide);
+  if (strcmp(mood, "falling") == 0) {
+    queue_text(session,
+               "The triage cot is empty, the tarp flapping. With the Front "
+               "ascendant, the medic has gone to ground -- or worse. There's no "
+               "care to be had here today. Turn the tide, and they'll come "
+               "back.");
+    cJSON *payload = json_object();
+    cJSON_AddNumberToObject(payload, "amount", 0);
+    cJSON_AddStringToObject(payload, "mood", mood);
+    cJSON_AddNumberToObject(payload, "tide", server->tide);
+    queue_event(session, "char.treated", payload);
+    return;
+  }
+  if (session->character.hp >= session->character.max_hp) {
+    queue_text(session,
+               "The medic looks you over and waves you off. \"You're whole. "
+               "Save the cot for someone who isn't.\"");
+    return;
+  }
+  time_t now = time(NULL);
+  if (session->treat_ready_at > now) {
+    long secs = (long)(session->treat_ready_at - now);
+    if (secs < 1) {
+      secs = 1;
+    }
+    queue_text(session,
+               "The medic shakes their head. \"I've done what I can for you for "
+               "now. Others are waiting.\" (%lds)",
+               secs);
+    return;
+  }
+  int before = session->character.hp;
+  if (strcmp(mood, "rising") == 0) {
+    session->character.hp = session->character.max_hp;
+    queue_text(session,
+               "The medic waves you onto the cot. With the free folk holding, "
+               "the waystation has supplies to spare -- they clean and bind "
+               "your wounds without a word about payment. You stand whole "
+               "again.");
+  } else {
+    session->character.hp += 12;
+    if (session->character.hp > session->character.max_hp) {
+      session->character.hp = session->character.max_hp;
+    }
+    queue_text(session,
+               "The medic is run off their feet, but waves you over and does "
+               "what they can with what little there is. It's not everything, "
+               "but it's something -- and it's freely given.");
+  }
+  session->treat_ready_at = now + 45;
+  hg_store_save(&server->store, &session->character);
+  cJSON *payload = json_object();
+  cJSON_AddNumberToObject(payload, "amount", session->character.hp - before);
+  cJSON_AddStringToObject(payload, "mood", mood);
+  cJSON_AddNumberToObject(payload, "tide", server->tide);
+  queue_event(session, "char.treated", payload);
+  send_vitals(session);
+}
+
+static int has_kept(hg_server *server, const char *keeper, const char *fallen) {
+  for (size_t i = 0; i < server->kept_count; ++i) {
+    if (strcasecmp(server->kept[i].keeper, keeper) == 0 &&
+        strcasecmp(server->kept[i].fallen, fallen) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void mark_kept(hg_server *server, const char *keeper, const char *fallen) {
+  if (has_kept(server, keeper, fallen) || server->kept_count >= HG_MAX_KEPT) {
+    return;
+  }
+  snprintf(server->kept[server->kept_count].keeper,
+           sizeof(server->kept[0].keeper), "%s", keeper);
+  snprintf(server->kept[server->kept_count].fallen,
+           sizeof(server->kept[0].fallen), "%s", fallen);
+  server->kept_count++;
+}
+
+static void cmd_witness(hg_session *session, hg_server *server, const char *arg) {
+  size_t limit = server->fallen_count > 12 ? 12 : server->fallen_count;
+  if (arg == NULL || arg[0] == '\0') {
+    cJSON *payload = json_object();
+    cJSON *fallen = cJSON_AddArrayToObject(payload, "fallen");
+    for (size_t i = 0; i < limit; ++i) {
+      cJSON *row = cJSON_CreateObject();
+      cJSON_AddStringToObject(row, "name", server->fallen[i].name);
+      cJSON_AddStringToObject(row, "world", server->fallen[i].world);
+      cJSON_AddStringToObject(row, "room", server->fallen[i].room);
+      cJSON_AddNumberToObject(row, "at", (double)server->fallen[i].at * 1000.0);
+      cJSON_AddItemToArray(fallen, row);
+    }
+    if (limit == 0) {
+      queue_text(session,
+                 "The roll is empty for now. No one the Grid remembers has "
+                 "fallen lately; may it stay that way.");
+    } else {
+      queue_text(session,
+                 "The Grid remembers these fallen. Speak a name to keep them:  "
+                 "(witness <name>)");
+      for (size_t i = 0; i < limit; ++i) {
+        queue_text(session, "  %s  -- fell at %s", server->fallen[i].name,
+                   server->fallen[i].room);
+      }
+    }
+    queue_event(session, "grid.fallen", payload);
+    return;
+  }
+  if (strcasecmp(arg, session->character.name) == 0) {
+    queue_text(session,
+               "You cannot hold a vigil for yourself. Someone else will have to "
+               "remember you.");
+    return;
+  }
+  const hg_fallen_entry *match = NULL;
+  for (size_t i = 0; i < server->fallen_count; ++i) {
+    if (strcasecmp(server->fallen[i].name, arg) == 0) {
+      match = &server->fallen[i];
+      break;
+    }
+  }
+  if (match == NULL) {
+    queue_text(session,
+               "The Grid holds no recent memory of anyone called \"%s\".  (try "
+               "'witness' to read the roll)",
+               arg);
+    return;
+  }
+  if (has_kept(server, session->character.name, match->name)) {
+    queue_text(session,
+               "You have already kept %s's memory. It does not fade, and does "
+               "not need keeping twice.",
+               match->name);
+    return;
+  }
+  mark_kept(server, session->character.name, match->name);
+  shift_morality(session, 2);
+  add_deed(server, session->character.name, "kept");
+  hg_store_save(&server->store, &session->character);
+  char text[160];
+  snprintf(text, sizeof(text),
+           "%s kept the memory of %s, whom the wastes tried to forget.",
+           session->character.name, match->name);
+  record_trace(server, server->config->world_name, session->character.room,
+               "vigil", text);
+  queue_text(session,
+             "You speak %s into the hum and hold it there a moment. The Grid "
+             "keeps the name; so do you.",
+             match->name);
+  cJSON *rem = json_object();
+  cJSON_AddStringToObject(rem, "fallen", match->name);
+  cJSON_AddStringToObject(rem, "world", match->world);
+  cJSON_AddStringToObject(rem, "room", match->room);
+  queue_event(session, "grid.remembrance", rem);
+  send_affects(session);
+}
+
+static void cmd_gridstats(hg_session *session, hg_server *server) {
+  if (!is_admin(server, session->character.name)) {
+    queue_text(session, "Only a keeper of the Grid can read its deep memory.");
+    return;
+  }
+  cJSON *payload = json_object();
+  cJSON_AddNumberToObject(payload, "total", (double)server->trace_count);
+  cJSON *kinds = cJSON_AddArrayToObject(payload, "kinds");
+  const char *seen[32];
+  int counts[32];
+  size_t seen_n = 0;
+  for (size_t i = 0; i < server->trace_count; ++i) {
+    const char *kind = server->traces[i].kind;
+    size_t j = 0;
+    for (; j < seen_n; ++j) {
+      if (strcmp(seen[j], kind) == 0) {
+        counts[j]++;
+        break;
+      }
+    }
+    if (j == seen_n && seen_n < 32) {
+      seen[seen_n] = kind;
+      counts[seen_n] = 1;
+      seen_n++;
+    }
+  }
+  for (size_t i = 0; i < seen_n; ++i) {
+    cJSON *row = cJSON_CreateObject();
+    cJSON_AddStringToObject(row, "kind", seen[i]);
+    cJSON_AddNumberToObject(row, "count", counts[i]);
+    cJSON_AddItemToArray(kinds, row);
+  }
+  queue_event(session, "grid.ledger_stats", payload);
+  queue_text(session, "Ledger holds %zu traces across %zu kinds.",
+             server->trace_count, seen_n);
+}
+
+static void cmd_gridprune(hg_session *session, hg_server *server) {
+  if (!is_admin(server, session->character.name)) {
+    queue_text(session, "Only a keeper of the Grid can prune its deep memory.");
+    return;
+  }
+  size_t before = server->trace_count;
+  size_t write = 0;
+  for (size_t i = 0; i < server->trace_count; ++i) {
+    const char *kind = server->traces[i].kind;
+    if (strcmp(kind, "ghost") == 0 || strcmp(kind, "passage") == 0 ||
+        strcmp(kind, "recall") == 0) {
+      continue;
+    }
+    if (write != i) {
+      server->traces[write] = server->traces[i];
+    }
+    write++;
+  }
+  server->trace_count = write;
+  cJSON *payload = json_object();
+  cJSON_AddNumberToObject(payload, "before", (double)before);
+  cJSON_AddNumberToObject(payload, "after", (double)server->trace_count);
+  cJSON_AddNumberToObject(payload, "removed",
+                          (double)(before - server->trace_count));
+  cJSON *kinds = cJSON_AddArrayToObject(payload, "kinds");
+  const char *seen[32];
+  int counts[32];
+  size_t seen_n = 0;
+  for (size_t i = 0; i < server->trace_count; ++i) {
+    const char *kind = server->traces[i].kind;
+    size_t j = 0;
+    for (; j < seen_n; ++j) {
+      if (strcmp(seen[j], kind) == 0) {
+        counts[j]++;
+        break;
+      }
+    }
+    if (j == seen_n && seen_n < 32) {
+      seen[seen_n] = kind;
+      counts[seen_n] = 1;
+      seen_n++;
+    }
+  }
+  for (size_t i = 0; i < seen_n; ++i) {
+    cJSON *row = cJSON_CreateObject();
+    cJSON_AddStringToObject(row, "kind", seen[i]);
+    cJSON_AddNumberToObject(row, "count", counts[i]);
+    cJSON_AddItemToArray(kinds, row);
+  }
+  queue_event(session, "grid.ledger_pruned", payload);
+  queue_text(session, "Ambient traces pruned (%zu -> %zu).", before,
+             server->trace_count);
 }
 
 static void free_holding_pit(hg_session *session, hg_server *server) {
@@ -2423,19 +3044,69 @@ static void handle_play(hg_session *session, hg_server *server, char *input) {
     cmd_war(session, server);
     return;
   }
+  if (strcmp(verb, "wall") == 0) {
+    cmd_wall(session, server, arg != NULL ? arg : "");
+    return;
+  }
+  if (strcmp(verb, "cache") == 0) {
+    cmd_cache(session, server, arg);
+    return;
+  }
+  if (strcmp(verb, "gather") == 0) {
+    cmd_gather(session, server);
+    return;
+  }
+  if (strcmp(verb, "give") == 0) {
+    cmd_give(session, server, arg);
+    return;
+  }
+  if (strcmp(verb, "treat") == 0) {
+    cmd_treat(session, server);
+    return;
+  }
+  if (strcmp(verb, "witness") == 0) {
+    cmd_witness(session, server, arg != NULL ? arg : "");
+    return;
+  }
+  if (strcmp(verb, "gridstats") == 0) {
+    cmd_gridstats(session, server);
+    return;
+  }
+  if (strcmp(verb, "gridprune") == 0) {
+    cmd_gridprune(session, server);
+    return;
+  }
   if (strcmp(verb, "affects") == 0) {
     send_affects(session);
     queue_text(session, "You stand clear: no afflictions hold you.");
     return;
   }
   if (strcmp(verb, "listen") == 0) {
+    if (server->trace_count > 0) {
+      const hg_trace *trace =
+          &server->traces[(size_t)rand() % server->trace_count];
+      cJSON *payload = json_object();
+      cJSON_AddStringToObject(payload, "kind", "echo");
+      cJSON_AddStringToObject(payload, "text", trace->text);
+      queue_event(session, "grid.transmission", payload);
+      queue_text(session,
+                 "You go still and tune the dead frequencies. The static "
+                 "thins, and the network plays something back -- a memory it "
+                 "never let go of:");
+      queue_text(session, "  >> %s <<", trace->text);
+      return;
+    }
     cJSON *payload = json_object();
     cJSON_AddStringToObject(payload, "kind", "signal");
     cJSON_AddStringToObject(
         payload, "text",
         "a residual field hums through dead ferrite, carrying a half-erased name");
     queue_event(session, "grid.transmission", payload);
-    queue_text(session, "You listen. The dead network answers.");
+    queue_text(session,
+               "You go still and tune the dead frequencies. Something answers:");
+    queue_text(session,
+               "  >> a residual field hums through dead ferrite, carrying a "
+               "half-erased name <<");
     return;
   }
   if (strcmp(verb, "ping") == 0) {
@@ -2491,7 +3162,8 @@ static void handle_play(hg_session *session, hg_server *server, char *input) {
                "Commands: look, exits, inventory, wield, remove, consider, "
                "attack, rest, sleep, list, buy, sell, use, talk, ability, "
                "title, who, join, defend, free, shelter, saved, listen, ping, "
-               "tell, reply, yell, emote, sense, help.");
+               "wall, cache, gather, give, treat, witness, tell, reply, yell, "
+               "emote, sense, help.");
     return;
   }
   if (strcmp(verb, "list") == 0 || strcmp(verb, "wares") == 0) {
@@ -2865,6 +3537,7 @@ int hg_server_run(const hg_server_config *config) {
     fprintf(stderr, "cannot initialize data directory: %s\n", config->data_dir);
     return 1;
   }
+  parse_admins(&server, config->admins);
   hg_world_init(&server.world);
   seed_traces(&server);
   srand((unsigned)time(NULL));
