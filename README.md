@@ -21,30 +21,42 @@ Sibling ports (same contract, different runtimes):
 > data, not buried in prose.
 
 - **Upstream contract:** [`the-hollow-grid/docs/protocol.md`](https://github.com/skyphusion-labs/the-hollow-grid/blob/main/docs/protocol.md)
-- **Definition of done:** upstream `smoke.mjs` (**135 checks**)
-- **Status:** scaffold only (Phase 0 not started). See `docs/PLAN.md`.
+- **Definition of done:** upstream `smoke.mjs` (**153 executable standalone
+  checks** on the 2026-07-17 revision)
+- **Status:** Phase 0 transport foundation in progress. `/ws`, login/resume,
+  structured events, health probes, and the Coil Yard opening map are playable.
+  See `docs/PLAN.md`.
 - **License:** AGPL-3.0-only (same as the other ports). See `LICENSE` + `NOTICE`.
 
-## Quick start (scaffold)
+## Quick start
 
 ```sh
-make
-./build/hollow-grid-c --help
+# macOS
+brew install libwebsockets cjson pkgconf
 
-# Later (when /ws is implemented):
-# ./build/hollow-grid-c --addr 0.0.0.0:8792
-# wscat -c ws://127.0.0.1:8792/ws
-# MUD_URL=ws://127.0.0.1:8792/ws node /path/to/the-hollow-grid/smoke.mjs
+# Debian / Ubuntu
+# sudo apt-get install libcjson-dev libwebsockets-dev pkg-config
+
+make
+./build/hollow-grid-c --addr 127.0.0.1:8792
+wscat -c ws://127.0.0.1:8792/ws
+
+# From a sibling the-hollow-grid checkout:
+MUD_URL=ws://127.0.0.1:8792/ws node /path/to/the-hollow-grid/smoke.mjs
 ```
 
-## Dependencies (planned)
+`make check` builds with strict warnings and runs the core world, event, and
+name-store tests.
+
+## Dependencies
 
 - C11 compiler (`clang` or `gcc`)
-- SQLite3 (persistence)
-- A WebSocket library (TBD in Phase 0: e.g. libwebsockets or similar)
-- cJSON or equivalent for `@event` payloads
+- libwebsockets (HTTP and WebSocket transport)
+- cJSON (`@event` payloads and the Phase 0 character store)
+- pkg-config (build flag discovery)
 
-Exact pins land when Phase 0 chooses the stack; keep the surface minimal.
+Phase 0 persists name-keyed characters as JSON under `DATA_DIR/characters`.
+SQLite replaces this small store when the full Phase 1 world state lands.
 
 ## Docs
 

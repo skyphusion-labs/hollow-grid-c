@@ -1,22 +1,24 @@
 # Build plan and status
 
 Porting the Hollow Grid world framework to C, against upstream
-`the-hollow-grid/docs/protocol.md`. The scoreboard is upstream `smoke.mjs` (**135
-checks**): build the port to pass it, phase by phase.
+`the-hollow-grid/docs/protocol.md`. The scoreboard is upstream `smoke.mjs`
+(**153 executable standalone checks** on the 2026-07-17 revision): build the
+port to pass it, phase by phase.
 
 Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`.
 
-## Phase 0 -- transport foundation (not started)
+## Phase 0 -- transport foundation (done)
 
-- [ ] Choose WebSocket + JSON stack (document in README); keep deps minimal
-- [ ] Project build (`Makefile` / CI compile)
-- [ ] **Ferrite Wastes** world identity (`docs/WORLD.md`) -- refine voice/map as content lands
-- [ ] Canonical anchor map seed (federation-required ids) + local graft rooms
-- [ ] `/ws` WebSocket, UTF-8 text, CRLF lines
-- [ ] Login flow: banner, name, race menu, play; name-based identity
-- [ ] `@event` channel framing
-- [ ] `/health` + `/health/deep`
-- [ ] Transport smoke against upstream `smoke.mjs` (login, resume, move subset)
+- [x] Minimal stack: libwebsockets + cJSON (documented in README)
+- [x] Strict C11 project build and core tests (`make check`) + CI dependencies
+- [x] **Ferrite Wastes** identity: hysteresis node + Coil Yard (`docs/WORLD.md`)
+- [x] Canonical opening map + Coil Yard graft west from `roof`
+- [x] `/ws` WebSocket, UTF-8 text, CRLF lines
+- [x] Login flow: banner, name, structured race menu, play; name-based identity
+- [x] Phase 0 JSON character store; persistent resume skips race creation
+- [x] `@event` framing: creation, room, vitals, affects, actions, world state
+- [x] `/health` + `/health/deep` with non-critical local hub check
+- [x] Upstream smoke transport gate: health, login, resume, move, and rat room green
 
 ## Phase 1 -- the world (standalone)
 
@@ -49,6 +51,6 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 
 | Target | ok | fail | skip | Notes |
 | --- | ---: | ---: | ---: | --- |
-| (none yet) | -- | -- | -- | Scaffold only |
+| Local Phase 0 (`127.0.0.1:8792`) | 36 | 115 | 2 | Transport gate green; failures are Phase 1 game, LocalHub, map, and federation features |
 
 **Parity targets:** Rust Choir (Go) and Verdigris Spool (Python) prod baselines on the same upstream suite.

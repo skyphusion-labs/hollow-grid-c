@@ -13,8 +13,9 @@ Cloudflare Workers + Durable Objects).
 This is a **complementary fleet world node**, not a Workers/DO port. It speaks the
 same language-agnostic wire protocol and joins the Grid Hub when `GRID_HUB_URL` is set.
 
-**Status:** scaffold. Definition of done is upstream `smoke.mjs` (**135 checks**).
-See `docs/PLAN.md`.
+**Status:** Phase 0 transport foundation complete. Definition of done is
+upstream `smoke.mjs` (**153 executable standalone checks** on the 2026-07-17
+revision). See `docs/PLAN.md`.
 
 ## The Grid federation
 
