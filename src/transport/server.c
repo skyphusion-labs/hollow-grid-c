@@ -37,16 +37,18 @@ typedef struct {
   char text[160];
 } hg_trace;
 
-typedef struct {
+typedef struct hg_session {
   struct lws *wsi;
   hg_session_state state;
   hg_character character;
   char target[16];
+  char reply_to[33];
   int market_resolved;
   hg_message *out_head;
   hg_message *out_tail;
   char input[512];
   size_t input_length;
+  struct hg_session *next;
 } hg_session;
 
 typedef struct {
@@ -56,6 +58,7 @@ typedef struct {
   hg_world_state world;
   hg_trace traces[HG_MAX_TRACES];
   size_t trace_count;
+  hg_session *sessions;
   time_t started;
 } hg_server;
 
@@ -151,6 +154,72 @@ static void seed_traces(hg_server *server) {
                "the Memorial Static scrolled a forgotten oath");
 }
 
+static const char *player_brand(const hg_character *character) {
+  if (character->ashsworn) {
+    return "ash-sworn";
+  }
+  if (strcmp(character->faction, "front") == 0) {
+    return "Cinder Front";
+  }
+  if (strcmp(character->faction, "ally") == 0) {
+    return "Free Folk ally";
+  }
+  if (character->morality >= 50) {
+    return "a beacon of the wastes";
+  }
+  if (character->morality <= -50) {
+    return "reviled";
+  }
+  return "";
+}
+
+static const char *player_regard(const hg_character *character) {
+  if (character->ashsworn) {
+    return "branded";
+  }
+  if (character->morality >= 50) {
+    return "honored";
+  }
+  if (character->morality <= -50) {
+    return "feared";
+  }
+  if (strcmp(character->faction, "ally") == 0) {
+    return "trusted";
+  }
+  if (strcmp(character->faction, "front") == 0) {
+    return "front";
+  }
+  return "neutral";
+}
+
+static void session_register(hg_server *server, hg_session *session) {
+  session->next = server->sessions;
+  server->sessions = session;
+}
+
+static void session_unregister(hg_server *server, hg_session *session) {
+  hg_session **cursor = &server->sessions;
+  while (*cursor != NULL) {
+    if (*cursor == session) {
+      *cursor = session->next;
+      session->next = NULL;
+      return;
+    }
+    cursor = &(*cursor)->next;
+  }
+}
+
+static hg_session *session_find(hg_server *server, const char *name) {
+  for (hg_session *session = server->sessions; session != NULL;
+       session = session->next) {
+    if (session->state == HG_PLAYING &&
+        strcasecmp(session->character.name, name) == 0) {
+      return session;
+    }
+  }
+  return NULL;
+}
+
 static int player_damage(const hg_character *character) {
   int damage = 1 + character->level;
   const hg_item *weapon = hg_item_by_id(character->weapon);
@@ -240,6 +309,33 @@ static void send_actions(hg_session *session, const hg_room *room) {
     }
     cJSON_AddItemToArray(actions, action);
   }
+  if (strcmp(room->id, "market") == 0) {
+    if (strcmp(session->character.faction, "front") != 0) {
+      cJSON *sell = cJSON_CreateObject();
+      cJSON_AddStringToObject(sell, "verb", "sell");
+      cJSON_AddStringToObject(sell, "label", "sell salvage for clean coin");
+      cJSON_AddStringToObject(sell, "kind", "economy");
+      cJSON_AddItemToArray(actions, sell);
+    }
+    cJSON *steal = cJSON_CreateObject();
+    cJSON_AddStringToObject(steal, "verb", "steal");
+    cJSON_AddStringToObject(steal, "label", "steal coin from the till");
+    cJSON_AddStringToObject(steal, "kind", "moral");
+    cJSON_AddStringToObject(steal, "valence", "corrupt");
+    cJSON_AddItemToArray(actions, steal);
+  }
+  if (strcmp(room->id, "tavern") == 0) {
+    cJSON *talk = cJSON_CreateObject();
+    cJSON_AddStringToObject(talk, "verb", "talk");
+    cJSON_AddStringToObject(talk, "label", "talk to the regulars");
+    cJSON_AddStringToObject(talk, "kind", "social");
+    cJSON_AddItemToArray(actions, talk);
+    cJSON *dust = cJSON_CreateObject();
+    cJSON_AddStringToObject(dust, "verb", "buy");
+    cJSON_AddStringToObject(dust, "label", "buy dust for 5 gold");
+    cJSON_AddStringToObject(dust, "kind", "vice");
+    cJSON_AddItemToArray(actions, dust);
+  }
   queue_event(session, "room.actions", payload);
 }
 
@@ -267,7 +363,19 @@ static void send_room_info(hg_session *session, hg_server *server,
     cJSON_AddItemToArray(mobs, mob);
   }
   cJSON_AddArrayToObject(payload, "items");
-  cJSON_AddArrayToObject(payload, "players");
+  cJSON *players = cJSON_AddArrayToObject(payload, "players");
+  for (hg_session *other = server->sessions; other != NULL; other = other->next) {
+    if (other == session || other->state != HG_PLAYING) {
+      continue;
+    }
+    if (strcmp(other->character.room, room->id) != 0) {
+      continue;
+    }
+    cJSON *player = cJSON_CreateObject();
+    cJSON_AddStringToObject(player, "name", other->character.name);
+    cJSON_AddStringToObject(player, "standing", player_brand(&other->character));
+    cJSON_AddItemToArray(players, player);
+  }
   queue_event(session, "room.info", payload);
 }
 
@@ -351,6 +459,7 @@ static void finish_login(hg_session *session, hg_server *server, int resumed) {
              resumed ? "The Grid finds your old charge, %s."
                      : "The field takes your measure, %s. Type help for verbs.",
              session->character.name);
+  session_register(server, session);
   send_world_state(session, server);
   send_scene(session, server);
   arm_heartbeat(session);
@@ -577,10 +686,13 @@ static void cmd_defend(hg_session *session, hg_server *server) {
     return;
   }
   snprintf(session->character.faction, sizeof(session->character.faction),
-           "free");
+           "ally");
   session->character.morality += 10;
   session->market_resolved = 1;
   queue_text(session, "You put yourself between the Front and the living.");
+  if (!hg_character_has_item(&session->character, "charm")) {
+    hg_character_add_item(&session->character, "charm");
+  }
   record_trace(server, server->config->world_name, session->character.room,
                "defense", "someone stood with the refugees here");
   hg_store_save(&server->store, &session->character);
@@ -613,9 +725,37 @@ static void handle_play(hg_session *session, hg_server *server, char *input) {
           hg_world_mob_in_room(&server->world, session->character.room, arg);
       if (mob != NULL) {
         queue_text(session, "%s", mob->description);
-      } else {
-        queue_text(session, "You don't see that here.");
+        return;
       }
+      hg_session *other = session_find(server, arg);
+      if (other != NULL &&
+          strcmp(other->character.room, session->character.room) == 0) {
+        char tagged[128];
+        const char *brand = player_brand(&other->character);
+        if (other->character.title[0] != '\0' && brand[0] != '\0') {
+          snprintf(tagged, sizeof(tagged), "%s, %s (%s)", other->character.name,
+                   other->character.title, brand);
+        } else if (other->character.title[0] != '\0') {
+          snprintf(tagged, sizeof(tagged), "%s, %s", other->character.name,
+                   other->character.title);
+        } else if (brand[0] != '\0') {
+          snprintf(tagged, sizeof(tagged), "%s (%s)", other->character.name,
+                   brand);
+        } else {
+          snprintf(tagged, sizeof(tagged), "%s", other->character.name);
+        }
+        queue_text(session, "%s stands before you, looking steady.", tagged);
+        cJSON *payload = json_object();
+        cJSON_AddStringToObject(payload, "name", other->character.name);
+        cJSON_AddStringToObject(payload, "title", other->character.title);
+        cJSON_AddStringToObject(payload, "faction", other->character.faction);
+        cJSON_AddBoolToObject(payload, "ashsworn", other->character.ashsworn);
+        cJSON_AddStringToObject(payload, "regard",
+                                player_regard(&other->character));
+        queue_event(session, "player.read", payload);
+        return;
+      }
+      queue_text(session, "You don't see that here.");
       return;
     }
     send_scene(session, server);
@@ -822,7 +962,151 @@ static void handle_play(hg_session *session, hg_server *server, char *input) {
   if (strcmp(verb, "help") == 0) {
     queue_text(session,
                "Commands: look, exits, inventory, wield, remove, consider, "
-               "attack, rest, join, defend, listen, ping, sense, help.");
+               "attack, rest, join, defend, listen, ping, tell, reply, yell, "
+               "emote, sense, help.");
+    return;
+  }
+  if (strcmp(verb, "tell") == 0) {
+    if (arg == NULL || arg[0] == '\0') {
+      queue_text(session, "Tell whom what?  (tell <player> <message>)");
+      return;
+    }
+    char *message = strchr(arg, ' ');
+    if (message == NULL || trim(message + 1)[0] == '\0') {
+      queue_text(session, "Tell whom what?  (tell <player> <message>)");
+      return;
+    }
+    *message = '\0';
+    message = trim(message + 1);
+    char target_name[33];
+    snprintf(target_name, sizeof(target_name), "%s", trim(arg));
+    hg_session *target = session_find(server, target_name);
+    if (target == NULL) {
+      queue_text(session, "No one by that name is connected.");
+      return;
+    }
+    snprintf(target->reply_to, sizeof(target->reply_to), "%s",
+             session->character.name);
+    queue_text(target, "%s tells you, \"%s\"", session->character.name,
+               message);
+    cJSON *payload = json_object();
+    cJSON_AddStringToObject(payload, "from", session->character.name);
+    cJSON_AddStringToObject(payload, "text", message);
+    queue_event(target, "comm.tell", payload);
+    queue_text(session, "You tell %s, \"%s\"", target->character.name, message);
+    return;
+  }
+  if (strcmp(verb, "reply") == 0) {
+    if (session->reply_to[0] == '\0') {
+      queue_text(session, "No one has told you anything lately.");
+      return;
+    }
+    if (arg == NULL || arg[0] == '\0') {
+      queue_text(session, "Reply with what?");
+      return;
+    }
+    char composed[200];
+    snprintf(composed, sizeof(composed), "%s %s", session->reply_to, arg);
+    char *old_arg = arg;
+    (void)old_arg;
+    /* Reuse tell by reconstructing. */
+    hg_session *target = session_find(server, session->reply_to);
+    if (target == NULL) {
+      queue_text(session, "No one by that name is connected.");
+      return;
+    }
+    snprintf(target->reply_to, sizeof(target->reply_to), "%s",
+             session->character.name);
+    queue_text(target, "%s tells you, \"%s\"", session->character.name, arg);
+    cJSON *payload = json_object();
+    cJSON_AddStringToObject(payload, "from", session->character.name);
+    cJSON_AddStringToObject(payload, "text", arg);
+    queue_event(target, "comm.tell", payload);
+    queue_text(session, "You tell %s, \"%s\"", target->character.name, arg);
+    return;
+  }
+  if (strcmp(verb, "yell") == 0) {
+    if (arg == NULL || arg[0] == '\0') {
+      queue_text(session, "Yell what?  (yell <message>)");
+      return;
+    }
+    for (hg_session *other = server->sessions; other != NULL;
+         other = other->next) {
+      if (other->state != HG_PLAYING) {
+        continue;
+      }
+      if (other == session) {
+        queue_text(other, "You yell, \"%s\"", arg);
+      } else {
+        queue_text(other, "%s yells, \"%s\"", session->character.name, arg);
+      }
+      cJSON *payload = json_object();
+      cJSON_AddStringToObject(payload, "from", session->character.name);
+      cJSON_AddStringToObject(payload, "text", arg);
+      queue_event(other, "comm.yell", payload);
+    }
+    return;
+  }
+  if (strcmp(verb, "emote") == 0 || strcmp(verb, "em") == 0 ||
+      strcmp(verb, "pose") == 0) {
+    if (arg == NULL || arg[0] == '\0') {
+      queue_text(session, "Emote what?  (emote <action>)");
+      return;
+    }
+    queue_text(session, "%s %s", session->character.name, arg);
+    for (hg_session *other = server->sessions; other != NULL;
+         other = other->next) {
+      if (other == session || other->state != HG_PLAYING) {
+        continue;
+      }
+      if (strcmp(other->character.room, session->character.room) != 0) {
+        continue;
+      }
+      queue_text(other, "%s %s", session->character.name, arg);
+    }
+    return;
+  }
+  if (strcmp(verb, "mend") == 0) {
+    if (arg == NULL || arg[0] == '\0') {
+      queue_text(session, "Mend whom?");
+      return;
+    }
+    hg_session *other = session_find(server, arg);
+    if (other == NULL ||
+        strcmp(other->character.room, session->character.room) != 0) {
+      queue_text(session, "No ally like that stands here.");
+      return;
+    }
+    if (other->character.hp >= other->character.max_hp) {
+      queue_text(session, "%s is already whole.", other->character.name);
+      return;
+    }
+    queue_text(session, "You mend %s.", other->character.name);
+    return;
+  }
+  if (strcmp(verb, "steal") == 0) {
+    if (strcmp(session->character.room, "market") != 0) {
+      queue_text(session, "You can't do that here.");
+      return;
+    }
+    session->character.morality -= 8;
+    session->character.gold += 12;
+    hg_store_save(&server->store, &session->character);
+    queue_text(session, "You snag a fistful of coin while the vendor looks away.");
+    send_vitals(session);
+    send_affects(session);
+    return;
+  }
+  if (strcmp(verb, "sell") == 0) {
+    if (strcmp(session->character.room, "market") != 0) {
+      queue_text(session, "Nobody here will buy.");
+      return;
+    }
+    if (strcmp(session->character.faction, "front") == 0) {
+      queue_text(session, "The market refuses to trade with the Cinder Front.");
+      return;
+    }
+    queue_text(session, "You have nothing the market wants right now.");
     return;
   }
   if (strcmp(verb, "recall") == 0 || strcmp(verb, "home") == 0) {
@@ -1006,6 +1290,7 @@ static int callback(struct lws *wsi, enum lws_callback_reasons reason,
     }
     return 0;
   case LWS_CALLBACK_CLOSED:
+    session_unregister(server, session);
     free_messages(session);
     return 0;
   default:

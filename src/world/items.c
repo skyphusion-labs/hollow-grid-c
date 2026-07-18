@@ -28,6 +28,11 @@ static const hg_item items[] = {
      .slot = "body",
      .armor = 2,
      .value = 3},
+    {.id = "charm",
+     .name = "an elven charm",
+     .description =
+         "A woven token of knotted grass and wire, pressed into your hand by "
+         "grateful refugees."},
     {.id = "radcell",
      .name = "a rad-cell",
      .description = "A cracked power cell, still warm.",
