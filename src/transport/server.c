@@ -2088,10 +2088,8 @@ static void cmd_worlds(hg_session *session, hg_server *server) {
       return;
     }
     for (size_t i = 0; i < remote_count; ++i) {
-      snprintf(converted[i].id, sizeof(converted[i].id), "%s",
-               remote_worlds[i].id);
-      snprintf(converted[i].url, sizeof(converted[i].url), "%s",
-               remote_worlds[i].url);
+      memcpy(converted[i].id, remote_worlds[i].id, sizeof(converted[i].id));
+      memcpy(converted[i].url, remote_worlds[i].url, sizeof(converted[i].url));
       converted[i].last_seen_ms = remote_worlds[i].last_seen_ms;
     }
     list = converted;
@@ -2150,9 +2148,8 @@ static int cmd_travel(hg_session *session, hg_server *server, const char *arg) {
     }
     world_count = remote_count;
     for (size_t i = 0; i < remote_count; ++i) {
-      snprintf(worlds[i].id, sizeof(worlds[i].id), "%s", remote_worlds[i].id);
-      snprintf(worlds[i].url, sizeof(worlds[i].url), "%s",
-               remote_worlds[i].url);
+      memcpy(worlds[i].id, remote_worlds[i].id, sizeof(worlds[i].id));
+      memcpy(worlds[i].url, remote_worlds[i].url, sizeof(worlds[i].url));
       worlds[i].last_seen_ms = remote_worlds[i].last_seen_ms;
     }
   }
@@ -3254,8 +3251,8 @@ static void cmd_who(hg_session *session, hg_server *server) {
         cJSON_AddBoolToObject(row, "here", 0);
         cJSON_AddStringToObject(row, "title", remote[i].title);
         cJSON_AddItemToArray(players, row);
-        char entry[128];
-        snprintf(entry, sizeof(entry), "%s [%s]", remote[i].name,
+        char entry[96];
+        snprintf(entry, sizeof(entry), "%.40s [%.40s]", remote[i].name,
                  remote[i].world);
         int written =
             snprintf(line + used, sizeof(line) - used, "%s %s", any ? ";" : "",
