@@ -1779,8 +1779,10 @@ static void cmd_wall(hg_session *session, hg_server *server, const char *arg) {
     }
     queue_text(other, "*** GRID BROADCAST ***  %s", arg);
     if (event_line != NULL) {
-      char *copy = strdup(event_line);
+      size_t len = strlen(event_line);
+      char *copy = malloc(len + 1);
       if (copy != NULL) {
+        memcpy(copy, event_line, len + 1);
         queue_owned(other, copy);
       }
     }
