@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "hg_store.h"
 
 #include <cjson/cJSON.h>
