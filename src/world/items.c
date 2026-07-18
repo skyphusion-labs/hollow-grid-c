@@ -37,6 +37,16 @@ static const hg_item items[] = {
      .name = "a rad-cell",
      .description = "A cracked power cell, still warm.",
      .value = 12},
+    {.id = "antidote",
+     .name = "a vial of antivenom",
+     .description =
+         "Pressed into your hands by someone you cut free. For the poison that "
+         "haunts these wastes.",
+     .value = 0},
+    {.id = "dust",
+     .name = "a pinch of dust",
+     .description = "Fine grey powder. The tavern sells it; the Grid remembers.",
+     .value = 2},
 };
 
 const hg_item *hg_item_by_id(const char *id) {
