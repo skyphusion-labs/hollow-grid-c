@@ -24,6 +24,15 @@
 #define HG_MAX_SAVED_SOULS 24
 #define HG_MAX_SAVED_PLAYERS 32
 #define HG_REFUGEE_NAME_LEN 32
+#define HG_STRAY_FLOOR (-20)
+#define HG_REDEEM_CEIL 5
+#define HG_MORALITY_FLOOR (-100)
+#define HG_MORALITY_CEIL 100
+#define HG_MAX_FORGIVEN 128
+#define HG_MAX_DEED_PLAYERS 64
+#define HG_MAX_DEED_KINDS 16
+#define HG_TIDE_FLOOR (-100)
+#define HG_TIDE_CEIL 100
 
 typedef enum {
   HG_WAIT_NAME,
@@ -56,6 +65,22 @@ typedef struct {
   size_t count;
 } hg_saved_souls;
 
+typedef struct {
+  char forgiver[33];
+  char subject[33];
+} hg_forgiven_pair;
+
+typedef struct {
+  char kind[16];
+  int count;
+} hg_deed_count;
+
+typedef struct {
+  char player[33];
+  hg_deed_count kinds[HG_MAX_DEED_KINDS];
+  size_t kind_count;
+} hg_deed_book;
+
 typedef struct hg_session {
   struct lws *wsi;
   hg_session_state state;
@@ -87,6 +112,11 @@ typedef struct {
   size_t rescued_count;
   hg_saved_souls saved[HG_MAX_SAVED_PLAYERS];
   size_t saved_player_count;
+  int tide;
+  hg_forgiven_pair forgiven[HG_MAX_FORGIVEN];
+  size_t forgiven_count;
+  hg_deed_book deeds[HG_MAX_DEED_PLAYERS];
+  size_t deed_player_count;
 } hg_server;
 
 static const char *k_refugee_names[] = {
@@ -646,6 +676,29 @@ static void send_actions(hg_session *session, hg_server *server,
     cJSON_AddStringToObject(shelter, "valence", "virtuous");
     cJSON_AddItemToArray(actions, shelter);
   }
+  if (strcmp(room->id, "dais") == 0) {
+    if (strcmp(session->character.faction, "none") == 0) {
+      cJSON *join = cJSON_CreateObject();
+      cJSON_AddStringToObject(join, "verb", "join");
+      cJSON_AddStringToObject(join, "label",
+                              "kneel and swear to the Cinder Front");
+      cJSON_AddStringToObject(join, "kind", "moral");
+      cJSON_AddStringToObject(join, "valence",
+                              strcmp(session->character.race, "elf") == 0
+                                  ? "grave"
+                                  : "corrupt");
+      cJSON_AddItemToArray(actions, join);
+    }
+    if (strcmp(session->character.faction, "front") == 0) {
+      cJSON *defy = cJSON_CreateObject();
+      cJSON_AddStringToObject(defy, "verb", "defy");
+      cJSON_AddStringToObject(
+          defy, "label", "defy the Ashmonger and defect to the free folk");
+      cJSON_AddStringToObject(defy, "kind", "moral");
+      cJSON_AddStringToObject(defy, "valence", "virtuous");
+      cJSON_AddItemToArray(actions, defy);
+    }
+  }
   queue_event(session, "room.actions", payload);
 }
 
@@ -962,55 +1015,548 @@ static void cmd_inventory(hg_session *session) {
   queue_text(session, "%s.", line);
 }
 
-static void cmd_join(hg_session *session, hg_server *server) {
-  const hg_room *room = hg_world_room(session->character.room);
-  if (room == NULL ||
-      (strcmp(room->id, "market") != 0 &&
-       strcmp(room->id, "bias-checkpoint") != 0)) {
-    queue_text(session, "There is no Front recruiter here.");
+static int race_is_hunted(const char *race) {
+  return strcmp(race, "elf") == 0 || strcmp(race, "revenant") == 0 ||
+         strcmp(race, "dustkin") == 0 || strcmp(race, "vatborn") == 0;
+}
+
+static void contribute_tide(hg_server *server, int delta) {
+  server->tide += delta;
+  if (server->tide > HG_TIDE_CEIL) {
+    server->tide = HG_TIDE_CEIL;
+  }
+  if (server->tide < HG_TIDE_FLOOR) {
+    server->tide = HG_TIDE_FLOOR;
+  }
+}
+
+static void add_deed(hg_server *server, const char *player, const char *kind) {
+  hg_deed_book *book = NULL;
+  for (size_t i = 0; i < server->deed_player_count; ++i) {
+    if (strcasecmp(server->deeds[i].player, player) == 0) {
+      book = &server->deeds[i];
+      break;
+    }
+  }
+  if (book == NULL) {
+    if (server->deed_player_count >= HG_MAX_DEED_PLAYERS) {
+      return;
+    }
+    book = &server->deeds[server->deed_player_count++];
+    memset(book, 0, sizeof(*book));
+    snprintf(book->player, sizeof(book->player), "%s", player);
+  }
+  for (size_t i = 0; i < book->kind_count; ++i) {
+    if (strcmp(book->kinds[i].kind, kind) == 0) {
+      book->kinds[i].count++;
+      return;
+    }
+  }
+  if (book->kind_count >= HG_MAX_DEED_KINDS) {
+    return;
+  }
+  snprintf(book->kinds[book->kind_count].kind,
+           sizeof(book->kinds[book->kind_count].kind), "%s", kind);
+  book->kinds[book->kind_count].count = 1;
+  book->kind_count++;
+}
+
+static int deed_count(hg_server *server, const char *player, const char *kind) {
+  for (size_t i = 0; i < server->deed_player_count; ++i) {
+    if (strcasecmp(server->deeds[i].player, player) == 0) {
+      for (size_t j = 0; j < server->deeds[i].kind_count; ++j) {
+        if (strcmp(server->deeds[i].kinds[j].kind, kind) == 0) {
+          return server->deeds[i].kinds[j].count;
+        }
+      }
+      return 0;
+    }
+  }
+  return 0;
+}
+
+static int has_forgiven(hg_server *server, const char *forgiver,
+                        const char *subject) {
+  for (size_t i = 0; i < server->forgiven_count; ++i) {
+    if (strcasecmp(server->forgiven[i].forgiver, forgiver) == 0 &&
+        strcasecmp(server->forgiven[i].subject, subject) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void mark_forgiven(hg_server *server, const char *forgiver,
+                          const char *subject) {
+  if (has_forgiven(server, forgiver, subject)) {
+    return;
+  }
+  if (server->forgiven_count >= HG_MAX_FORGIVEN) {
+    return;
+  }
+  hg_forgiven_pair *pair = &server->forgiven[server->forgiven_count++];
+  snprintf(pair->forgiver, sizeof(pair->forgiver), "%s", forgiver);
+  snprintf(pair->subject, sizeof(pair->subject), "%s", subject);
+}
+
+static void shift_morality(hg_session *session, int delta) {
+  session->character.morality += delta;
+  if (session->character.morality > HG_MORALITY_CEIL) {
+    session->character.morality = HG_MORALITY_CEIL;
+  }
+  if (session->character.morality < HG_MORALITY_FLOOR) {
+    session->character.morality = HG_MORALITY_FLOOR;
+  }
+}
+
+static void resolve_return(hg_session *session, hg_server *server,
+                           hg_character *subject, int emit_to_session) {
+  subject->redeemed = 1;
+  if (subject->title[0] == '\0') {
+    snprintf(subject->title, sizeof(subject->title), "the Returned");
+  }
+  hg_store_save(&server->store, subject);
+  cJSON *payload = json_object();
+  cJSON_AddStringToObject(payload, "name", subject->name);
+  cJSON_AddStringToObject(payload, "title", subject->title);
+  if (emit_to_session) {
+    queue_event(session, "grid.redemption", payload);
+  } else {
+    hg_session *target = session_find(server, subject->name);
+    if (target != NULL) {
+      queue_event(target, "grid.redemption", payload);
+    } else {
+      cJSON_Delete(payload);
+    }
+  }
+  char text[160];
+  snprintf(text, sizeof(text), "%s found their way back from the cinders.",
+           subject->name);
+  record_trace(server, server->config->world_name, subject->room, "redemption",
+               text);
+}
+
+static void moral_arc(hg_session *session, hg_server *server) {
+  hg_character *p = &session->character;
+  if (!p->strayed && p->morality <= HG_STRAY_FLOOR) {
+    p->strayed = 1;
+    hg_store_save(&server->store, p);
+    queue_text(session,
+               "Something in you has gone cold and quiet. You have strayed a "
+               "long way toward the cinders. (the Grid marks it, and so do "
+               "you)");
+    return;
+  }
+  if (p->strayed && !p->redeemed && p->morality >= HG_REDEEM_CEIL &&
+      strcmp(p->faction, "front") != 0) {
+    p->redeemed = 1;
+    if (p->ashsworn) {
+      hg_store_save(&server->store, p);
+      record_trace(server, server->config->world_name, p->room, "penance",
+                   "someone has done real good, though the ash-mark remains.");
+      queue_text(session,
+                 "You have clawed back to something good, and it is real. But "
+                 "the ash does not wash off; it never will. That is the cost. "
+                 "Carry it, and keep doing good anyway.");
+      return;
+    }
+    resolve_return(session, server, p, 1);
+    queue_text(session,
+               "The hollow you carried has filled with something else. The free "
+               "folk have started to meet your eyes again. You found your way "
+               "back. (you are the Returned)");
+  }
+}
+
+static void dais_pledge(hg_session *session, hg_server *server) {
+  if (strcmp(session->character.faction, "none") != 0) {
+    queue_text(session,
+               "The Ashmonger only laughs. There's nothing here to decide that "
+               "your blood hasn't already settled.");
     return;
   }
   snprintf(session->character.faction, sizeof(session->character.faction),
            "front");
-  session->character.morality -= 20;
-  session->market_resolved = 1;
-  if (strcmp(session->character.race, "elf") == 0) {
+  if (race_is_hunted(session->character.race)) {
     session->character.ashsworn = 1;
-    snprintf(session->character.title, sizeof(session->character.title),
-             "the ash-sworn");
+    shift_morality(session, -40);
     queue_text(session,
-               "You take the Front's coin. The wastes mark you ash-sworn.");
+               "You kneel before the Ashmonger -- an elf, at the feet of the "
+               "man who cages elves.");
+    queue_text(session,
+               "He laughs, delighted, and burns the ash-and-flame into your "
+               "shoulder with his own hand.");
+    queue_text(session,
+               "\"The best dogs are the ones who hate themselves. You'll do the "
+               "work my men won't.\"");
+    queue_text(session,
+               "You are ash-sworn now. There is no one left to belong to.");
   } else {
-    queue_text(session, "You take the Front's coin and look away.");
+    shift_morality(session, -25);
+    queue_text(session,
+               "You kneel and swear yourself to the Front. The Ashmonger's hand "
+               "closes on your shoulder like a trap. \"Good. The wastes will be "
+               "ours.\"");
   }
-  record_trace(server, server->config->world_name, session->character.room,
-               "oath", "a Cinder Front oath was sworn here");
+  add_deed(server, session->character.name, "pledged");
+  contribute_tide(server, -10);
+  char text[160];
+  snprintf(text, sizeof(text), "%s swore themselves to the Cinder Front at the "
+                               "Ashmonger's dais.",
+           session->character.name);
+  record_trace(server, server->config->world_name, "dais", "oath", text);
   hg_store_save(&server->store, &session->character);
+  broadcast_room(server, "dais", session->character.name,
+                 "%s swore themselves to the Cinder Front at the Ashmonger's "
+                 "dais.",
+                 session->character.name);
+  moral_arc(session, server);
   send_affects(session);
+  send_vitals(session);
+  const hg_room *room = hg_world_room("dais");
+  if (room != NULL) {
+    send_actions(session, server, room);
+  }
+}
+
+static void dais_defect(hg_session *session, hg_server *server) {
+  if (strcmp(session->character.room, "dais") != 0 ||
+      strcmp(session->character.faction, "front") != 0) {
+    queue_text(session, "There's no oath here to break.");
+    return;
+  }
+  snprintf(session->character.faction, sizeof(session->character.faction),
+           "ally");
+  shift_morality(session, 30);
+  if (session->character.ashsworn) {
+    queue_text(session,
+               "You spit at the Ashmonger's boots. \"I'm done being your dog.\" "
+               "The stronghold turns on you at once.");
+    queue_text(session,
+               "You stand with the free folk now -- but the brand on your "
+               "shoulder stays. For once you wear it turning the right way.");
+  } else {
+    queue_text(session,
+               "You spit at the Ashmonger's boots. \"I'm done being your dog.\" "
+               "Every soldier in the stronghold turns on you at once -- but you "
+               "stand with the free folk now, and the wastes will remember THIS "
+               "above all.");
+  }
+  add_deed(server, session->character.name, "defected");
+  contribute_tide(server, 10);
+  char text[160];
+  snprintf(text, sizeof(text),
+           "%s turned on the Cinder Front at the Ashmonger's own dais.",
+           session->character.name);
+  record_trace(server, server->config->world_name, "dais", "oath", text);
+  hg_store_save(&server->store, &session->character);
+  broadcast_room(server, "dais", session->character.name,
+                 "%s has turned against the Cinder Front!",
+                 session->character.name);
+  if (session->character.strayed && !session->character.redeemed &&
+      !session->character.ashsworn &&
+      session->character.morality >= HG_REDEEM_CEIL) {
+    resolve_return(session, server, &session->character, 1);
+  } else {
+    moral_arc(session, server);
+  }
+  send_affects(session);
+  send_vitals(session);
+  const hg_room *room = hg_world_room("dais");
+  if (room != NULL) {
+    send_actions(session, server, room);
+  }
+}
+
+static void cmd_join(hg_session *session, hg_server *server) {
+  const hg_room *room = hg_world_room(session->character.room);
+  if (room != NULL && strcmp(room->id, "dais") == 0) {
+    dais_pledge(session, server);
+    return;
+  }
+  if (room == NULL ||
+      (strcmp(room->id, "market") != 0 && strcmp(room->id, "checkpoint") != 0)) {
+    queue_text(session, "There is no Front recruiter here.");
+    return;
+  }
+  if (session->market_resolved) {
+    queue_text(session, "There is no one here to swear to.");
+    return;
+  }
+  snprintf(session->character.faction, sizeof(session->character.faction),
+           "front");
+  session->market_resolved = 1;
+  if (race_is_hunted(session->character.race)) {
+    session->character.ashsworn = 1;
+    shift_morality(session, -40);
+    queue_text(session,
+               "You take the Front's coin. The recruiter sees what you are -- "
+               "one of the hunted -- and grins, because there is no one they "
+               "prize more than a traitor to his own. They burn the mark into "
+               "you: ash-sworn. A kapo. One of your people's hunters now. It "
+               "does not wash off, in this life or in the Grid's long memory.");
+  } else {
+    shift_morality(session, -15);
+    queue_text(session,
+               "You take the Front's coin. It is warm, which is worse. You are "
+               "Cinder Front now, and the wastes will remember which side you "
+               "chose when choosing was easy.");
+  }
+  add_deed(server, session->character.name, "pledged");
+  contribute_tide(server, -10);
+  char text[160];
+  snprintf(text, sizeof(text), "%s swore to the Cinder Front.",
+           session->character.name);
+  record_trace(server, server->config->world_name, session->character.room,
+               "oath", text);
+  hg_store_save(&server->store, &session->character);
+  moral_arc(session, server);
+  send_affects(session);
+  send_vitals(session);
   send_actions(session, server, room);
 }
 
 static void cmd_defend(hg_session *session, hg_server *server) {
   const hg_room *room = hg_world_room(session->character.room);
   if (room == NULL ||
-      (strcmp(room->id, "market") != 0 &&
-       strcmp(room->id, "bias-checkpoint") != 0)) {
+      (strcmp(room->id, "market") != 0 && strcmp(room->id, "checkpoint") != 0)) {
     queue_text(session, "There is no one here asking for your stand.");
+    return;
+  }
+  if (session->market_resolved) {
+    queue_text(session, "There is no stand to take here.");
     return;
   }
   snprintf(session->character.faction, sizeof(session->character.faction),
            "ally");
-  session->character.morality += 10;
+  shift_morality(session, 10);
   session->market_resolved = 1;
   queue_text(session, "You put yourself between the Front and the living.");
   if (!hg_character_has_item(&session->character, "charm")) {
     hg_character_add_item(&session->character, "charm");
   }
+  add_deed(server, session->character.name, "stood");
+  contribute_tide(server, 10);
   record_trace(server, server->config->world_name, session->character.room,
                "defense", "someone stood with the refugees here");
   hg_store_save(&server->store, &session->character);
+  moral_arc(session, server);
   send_affects(session);
+  send_vitals(session);
   send_actions(session, server, room);
+}
+
+static void cmd_forgive(hg_session *session, hg_server *server, const char *arg) {
+  if (arg == NULL || arg[0] == '\0') {
+    queue_text(session,
+               "Forgive whom?  (forgive <player> -- choose to let someone marked "
+               "back in)");
+    return;
+  }
+  char who[33];
+  snprintf(who, sizeof(who), "%s", arg);
+  char *space = strchr(who, ' ');
+  if (space != NULL) {
+    *space = '\0';
+  }
+  hg_session *target = session_find(server, who);
+  if (target == NULL ||
+      strcmp(target->character.room, session->character.room) != 0) {
+    if (target != NULL &&
+        strcasecmp(target->character.name, session->character.name) == 0) {
+      queue_text(session,
+                 "You cannot forgive yourself here; that is a longer road, and "
+                 "a lonelier one.");
+    } else {
+      queue_text(session, "There's no one called \"%s\" here to forgive.", who);
+    }
+    return;
+  }
+  if (strcasecmp(target->character.name, session->character.name) == 0) {
+    queue_text(session,
+               "You cannot forgive yourself here; that is a longer road, and a "
+               "lonelier one.");
+    return;
+  }
+  if (has_forgiven(server, session->character.name, target->character.name)) {
+    queue_text(session,
+               "You have already forgiven %s. It was true the first time; it "
+               "does not need saying twice.",
+               target->character.name);
+    return;
+  }
+  int marked = target->character.ashsworn || target->character.strayed ||
+               strcmp(target->character.faction, "front") == 0 ||
+               target->character.morality <= -50;
+  if (!marked) {
+    queue_text(session,
+               "%s carries nothing that needs your forgiveness. Keep the words "
+               "for someone who does.",
+               target->character.name);
+    return;
+  }
+  mark_forgiven(server, session->character.name, target->character.name);
+  target->character.morality += 5;
+  if (target->character.morality > HG_MORALITY_CEIL) {
+    target->character.morality = HG_MORALITY_CEIL;
+  }
+  shift_morality(session, 2);
+  add_deed(server, session->character.name, "forgave");
+  char text[160];
+  snprintf(text, sizeof(text), "%s forgave %s here.", session->character.name,
+           target->character.name);
+  record_trace(server, server->config->world_name, session->character.room,
+               "grace", text);
+
+  queue_text(target, "%s looks at you and chooses to forgive you.",
+             session->character.name);
+  if (target->character.ashsworn) {
+    queue_text(target,
+               "It reaches something in you. But the ash does not lift; it "
+               "never will. You carry the mark and the mercy both. Some things "
+               "are not forgotten, even when they are forgiven.");
+    cJSON *payload = json_object();
+    cJSON_AddStringToObject(payload, "by", session->character.name);
+    cJSON_AddBoolToObject(payload, "ashsworn", 1);
+    cJSON_AddBoolToObject(payload, "redeemed", 0);
+    queue_event(target, "char.forgiven", payload);
+  } else if (target->character.strayed && !target->character.redeemed &&
+             strcmp(target->character.faction, "front") != 0) {
+    cJSON *payload = json_object();
+    cJSON_AddStringToObject(payload, "by", session->character.name);
+    cJSON_AddBoolToObject(payload, "ashsworn", 0);
+    cJSON_AddBoolToObject(payload, "redeemed", 1);
+    queue_event(target, "char.forgiven", payload);
+    resolve_return(session, server, &target->character, 0);
+    queue_text(target,
+               "Something you had been carrying alone, you are not carrying "
+               "alone anymore. You found your way back, and someone met you on "
+               "the road. (you are the Returned)");
+    send_affects(target);
+  } else {
+    cJSON *payload = json_object();
+    cJSON_AddStringToObject(payload, "by", session->character.name);
+    cJSON_AddBoolToObject(payload, "ashsworn", 0);
+    cJSON_AddBoolToObject(payload, "redeemed", 0);
+    queue_event(target, "char.forgiven", payload);
+    queue_text(target,
+               "It lands, and it stays with you. The road is still yours to "
+               "walk, but you are not walking it unseen.");
+  }
+  hg_store_save(&server->store, &target->character);
+  hg_store_save(&server->store, &session->character);
+  queue_text(session,
+             "You choose to forgive %s. Out here that is not nothing; it may be "
+             "everything.",
+             target->character.name);
+  send_affects(session);
+}
+
+static void cmd_reckoning(hg_session *session, hg_server *server) {
+  const char *standing = "unaligned";
+  if (strcmp(session->character.faction, "front") == 0) {
+    standing = "Cinder Front";
+  } else if (strcmp(session->character.faction, "ally") == 0) {
+    standing = "Free Folk ally";
+  }
+  queue_text(session, "The Grid has kept count. This is the sum of you so far:");
+  if (session->character.ashsworn) {
+    queue_text(session, "  standing: %s   (morality %d)   ASH-SWORN", standing,
+               session->character.morality);
+  } else {
+    queue_text(session, "  standing: %s   (morality %d)", standing,
+               session->character.morality);
+  }
+  if (session->character.redeemed && !session->character.ashsworn) {
+    queue_text(session,
+               "  the Returned -- you strayed toward the cinders and found your "
+               "way back.");
+  } else if (session->character.redeemed && session->character.ashsworn) {
+    queue_text(session,
+               "  ash-marked, and good anyway -- the brand stays; you keep "
+               "choosing well regardless.");
+  } else if (session->character.strayed) {
+    queue_text(session,
+               "  strayed -- you have gone a long way toward the cinders. (the "
+               "way back is not closed)");
+  }
+
+  static const char *kinds[] = {
+      "mended",  "forgave",  "aided",    "kept",     "freed",
+      "sheltered", "stood",  "inscribed", "restored", "slain",
+      "stolen",  "pledged",  "defected"};
+  static const char *labels[] = {
+      "  mended the hurt of others: ",
+      "  souls you chose to forgive: ",
+      "  aid left for strangers you'll never meet: ",
+      "  names of the fallen you kept: ",
+      "  souls you cut out of the cages: ",
+      "  distress calls you answered: ",
+      "  times you stood with the free folk: ",
+      "  words you left for whoever comes next: ",
+      "  dead nodes you brought back: ",
+      "  lives you took: ",
+      "  thefts: ",
+      "  times you swore to the Cinder Front: ",
+      "  times you turned on the Front: "};
+  cJSON *payload = json_object();
+  cJSON_AddNumberToObject(payload, "morality", session->character.morality);
+  cJSON_AddStringToObject(payload, "standing", session->character.faction);
+  cJSON_AddBoolToObject(payload, "ashsworn", session->character.ashsworn);
+  cJSON_AddBoolToObject(payload, "strayed", session->character.strayed);
+  cJSON_AddBoolToObject(payload, "redeemed", session->character.redeemed);
+  cJSON *deeds = cJSON_AddObjectToObject(payload, "deeds");
+  int any = 0;
+  for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); ++i) {
+    int count = deed_count(server, session->character.name, kinds[i]);
+    cJSON_AddNumberToObject(deeds, kinds[i], count);
+    if (count > 0) {
+      queue_text(session, "%s%d", labels[i], count);
+      any = 1;
+    }
+  }
+  if (!any) {
+    queue_text(session,
+               "  Nothing yet weighs on either side. The wastes are still "
+               "waiting to see who you are.");
+  }
+  queue_event(session, "char.reckoning", payload);
+}
+
+static void cmd_war(hg_session *session, hg_server *server) {
+  int tide = server->tide;
+  const char *state = "the war hangs in perfect, brutal balance.";
+  if (tide <= -50) {
+    state = "the Cinder Front is ascendant -- the free folk are being driven "
+            "under, across every world at once.";
+  } else if (tide >= 50) {
+    state = "the free folk are winning -- the Front is breaking, everywhere.";
+  } else if (tide < 0) {
+    state = "the Front holds the edge, for now.";
+  } else if (tide > 0) {
+    state = "the free folk are holding their ground.";
+  }
+  if (tide >= 0) {
+    queue_text(session, "Across the whole Grid, the war for the wastes: %s (tide "
+                        "+%d)",
+               state, tide);
+  } else {
+    queue_text(session, "Across the whole Grid, the war for the wastes: %s (tide "
+                        "%d)",
+               state, tide);
+  }
+  if (tide >= 40) {
+    queue_text(session,
+               "  And you can see it in the world itself: the wastes are "
+               "starting, here and there, to come back to life.");
+  } else if (tide <= -40) {
+    queue_text(session,
+               "  And you can see it in the world itself: everything is drawing "
+               "in, going quiet and afraid.");
+  }
+  cJSON *payload = json_object();
+  cJSON_AddNumberToObject(payload, "tide", tide);
+  queue_event(session, "world.war", payload);
 }
 
 static void free_holding_pit(hg_session *session, hg_server *server) {
@@ -1028,7 +1574,8 @@ static void free_holding_pit(hg_session *session, hg_server *server) {
   char freed[1][HG_REFUGEE_NAME_LEN];
   pick_refugee_names(freed, 1);
   hg_character_add_item(&session->character, "antidote");
-  session->character.morality += 12;
+  shift_morality(session, 12);
+  add_deed(server, session->character.name, "freed");
   hg_store_save(&server->store, &session->character);
   emit_rescued(session, server, freed, 1);
   queue_text(session,
@@ -1046,6 +1593,7 @@ static void free_holding_pit(hg_session *session, hg_server *server) {
            session->character.name, freed[0]);
   record_trace(server, server->config->world_name, "holding_pit", "quest",
                trace);
+  moral_arc(session, server);
   send_affects(session);
   const hg_room *room = hg_world_room("holding_pit");
   if (room != NULL) {
@@ -1065,7 +1613,8 @@ static void free_cells(hg_session *session, hg_server *server) {
   char freed[4][HG_REFUGEE_NAME_LEN];
   pick_refugee_names(freed, count);
   set_cage_refill(server, "cells");
-  session->character.morality += 15;
+  shift_morality(session, 15);
+  add_deed(server, session->character.name, "freed");
   hg_store_save(&server->store, &session->character);
   emit_rescued(session, server, freed, count);
   char listed[160];
@@ -1079,6 +1628,7 @@ static void free_cells(hg_session *session, hg_server *server) {
                  "%s throws open the Front's cages!", session->character.name);
   record_trace(server, server->config->world_name, "cells", "quest",
                "someone freed the caged refugees here.");
+  moral_arc(session, server);
   send_affects(session);
 }
 
@@ -1113,7 +1663,8 @@ static void cmd_shelter(hg_session *session, hg_server *server) {
   char saved[4][HG_REFUGEE_NAME_LEN];
   pick_refugee_names(saved, count);
   set_cage_refill(server, "transit_hub");
-  session->character.morality += 15;
+  shift_morality(session, 15);
+  add_deed(server, session->character.name, "sheltered");
   hg_store_save(&server->store, &session->character);
   emit_rescued(session, server, saved, count);
   char listed[160];
@@ -1130,6 +1681,7 @@ static void cmd_shelter(hg_session *session, hg_server *server) {
                  session->character.name);
   record_trace(server, server->config->world_name, "transit_hub", "aid",
                "someone answered the transit-hub distress call.");
+  moral_arc(session, server);
   send_affects(session);
 }
 
@@ -1854,6 +2406,28 @@ static void handle_play(hg_session *session, hg_server *server, char *input) {
     cmd_defend(session, server);
     return;
   }
+  if (strcmp(verb, "defy") == 0) {
+    dais_defect(session, server);
+    return;
+  }
+  if (strcmp(verb, "forgive") == 0 || strcmp(verb, "absolve") == 0 ||
+      strcmp(verb, "pardon") == 0) {
+    cmd_forgive(session, server, arg);
+    return;
+  }
+  if (strcmp(verb, "reckoning") == 0) {
+    cmd_reckoning(session, server);
+    return;
+  }
+  if (strcmp(verb, "war") == 0) {
+    cmd_war(session, server);
+    return;
+  }
+  if (strcmp(verb, "affects") == 0) {
+    send_affects(session);
+    queue_text(session, "You stand clear: no afflictions hold you.");
+    return;
+  }
   if (strcmp(verb, "listen") == 0) {
     cJSON *payload = json_object();
     cJSON_AddStringToObject(payload, "kind", "signal");
@@ -2072,10 +2646,12 @@ static void handle_play(hg_session *session, hg_server *server, char *input) {
       queue_text(session, "You can't do that here.");
       return;
     }
-    session->character.morality -= 8;
+    shift_morality(session, -8);
     session->character.gold += 12;
+    add_deed(server, session->character.name, "stolen");
     hg_store_save(&server->store, &session->character);
     queue_text(session, "You snag a fistful of coin while the vendor looks away.");
+    moral_arc(session, server);
     send_vitals(session);
     send_affects(session);
     return;
