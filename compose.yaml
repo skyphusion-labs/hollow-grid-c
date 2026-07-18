@@ -1,0 +1,31 @@
+# Ferrite Wastes on the Hollow Grid (C port). Pull the GHCR image after merge to
+# main, or build locally: docker compose build
+#
+# Federation: set GRID_HUB_URL + GRID_HUB_TOKEN in .env (see .env.example).
+# Standalone works with those unset (LocalHub fallback).
+#
+# Fleet (biafra): VLAN bind + cloudflared at ferrite.skyphusion.org -- see
+# fleet-chezmoi system/stacks/biafra/ferrite-wastes/.
+
+services:
+  ferrite-wastes:
+    image: ghcr.io/skyphusion-labs/hollow-grid-c:latest
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8792:8792"
+    volumes:
+      - ferrite-wastes-data:/data
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      LISTEN_ADDR: "0.0.0.0:8792"
+      DATA_DIR: /data
+      WORLD_NAME: Ferrite Wastes
+      # WORLD_URL: wss://ferrite.skyphusion.org/ws
+      # GRID_HUB_URL: https://grid-hub.skyphusion.org/rpc
+      # GRID_HUB_TOKEN: set in .env (never commit)
+
+volumes:
+  ferrite-wastes-data:

@@ -13,7 +13,7 @@ Sibling ports (same contract, different runtimes):
 | [the-hollow-grid](https://github.com/skyphusion-labs/the-hollow-grid) (TS) | Hollow / Dustfall | hollow / dustfall `.skyphusion.org` |
 | [hollow-grid-go](https://github.com/skyphusion-labs/hollow-grid-go) | Rust Choir | `wss://rustchoir.skyphusion.org/ws` |
 | [hollow-grid-py](https://github.com/skyphusion-labs/hollow-grid-py) | Verdigris Spool | `wss://verdigris.skyphusion.org/ws` |
-| **This repo (C)** | **Ferrite Wastes** (provisional; see `docs/WORLD.md`) | not live yet |
+| **This repo (C)** | **Ferrite Wastes** (see `docs/WORLD.md`) | `wss://ferrite.skyphusion.org/ws` (fleet) |
 
 > The Hollow Grid is a dead network that outlived its makers. Worlds are nodes on
 > that network; the shared backend *is* the Grid. Ferrite Wastes is where magnetic
@@ -23,8 +23,8 @@ Sibling ports (same contract, different runtimes):
 - **Upstream contract:** [`the-hollow-grid/docs/protocol.md`](https://github.com/skyphusion-labs/the-hollow-grid/blob/main/docs/protocol.md)
 - **Definition of done:** upstream `smoke.mjs` (**153 executable standalone
   checks** on the 2026-07-17 revision)
-- **Status:** Phase 0 transport foundation in progress. `/ws`, login/resume,
-  structured events, health probes, and the Coil Yard opening map are playable.
+- **Status:** Phase 2 federation client green locally (153/0/1 smoke). Phase 3
+  container + GHCR release in progress; fleet host `ferrite.skyphusion.org`.
   See `docs/PLAN.md`.
 - **License:** AGPL-3.0-only (same as the other ports). See `LICENSE` + `NOTICE`.
 
@@ -32,10 +32,10 @@ Sibling ports (same contract, different runtimes):
 
 ```sh
 # macOS
-brew install libwebsockets cjson pkgconf
+brew install libwebsockets cjson curl pkgconf
 
 # Debian / Ubuntu
-# sudo apt-get install libcjson-dev libwebsockets-dev pkg-config
+# sudo apt-get install libcjson-dev libwebsockets-dev libcurl4-openssl-dev pkg-config
 
 make
 ./build/hollow-grid-c --addr 127.0.0.1:8792
@@ -48,15 +48,27 @@ MUD_URL=ws://127.0.0.1:8792/ws node /path/to/the-hollow-grid/smoke.mjs
 `make check` builds with strict warnings and runs the core world, event, and
 name-store tests.
 
+## Docker
+
+```sh
+docker compose build
+docker compose up -d
+curl -sf http://127.0.0.1:8792/health
+# Optional federation: copy .env.example -> .env and set GRID_HUB_TOKEN
+```
+
+Image: `ghcr.io/skyphusion-labs/hollow-grid-c` (pushed from `release.yml` on
+merge to `main`). Fleet host: `wss://ferrite.skyphusion.org/ws`.
+
 ## Dependencies
 
 - C11 compiler (`clang` or `gcc`)
 - libwebsockets (HTTP and WebSocket transport)
-- cJSON (`@event` payloads and the Phase 0 character store)
+- cJSON (`@event` payloads and the character store)
+- libcurl (RemoteHub Grid Hub HTTP JSON-RPC)
 - pkg-config (build flag discovery)
 
-Phase 0 persists name-keyed characters as JSON under `DATA_DIR/characters`.
-SQLite replaces this small store when the full Phase 1 world state lands.
+Characters persist as JSON under `DATA_DIR/characters` until SQLite lands.
 
 ## Docs
 

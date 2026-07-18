@@ -11,3 +11,6 @@
 .env
 .vscode/
 .idea/
+
+# Local operator secrets (hub token, etc.)
+.local/

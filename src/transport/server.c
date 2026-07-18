@@ -2167,8 +2167,9 @@ static int cmd_travel(hg_session *session, hg_server *server, const char *arg) {
   }
   if (dest == NULL) {
     for (size_t i = 0; i < world_count; ++i) {
-      char id_lower[48];
-      snprintf(id_lower, sizeof(id_lower), "%s", worlds[i].id);
+      char id_lower[sizeof(worlds[i].id)];
+      memcpy(id_lower, worlds[i].id, sizeof(id_lower));
+      id_lower[sizeof(id_lower) - 1] = '\0';
       for (char *p = id_lower; *p != '\0'; ++p) {
         *p = (char)tolower((unsigned char)*p);
       }

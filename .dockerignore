@@ -1,0 +1,11 @@
+build/
+data/
+.local/
+.env
+.git/
+.github/
+*.o
+*.a
+.DS_Store
+.vscode/
+.idea/

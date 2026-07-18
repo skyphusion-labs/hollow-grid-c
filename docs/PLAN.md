@@ -52,9 +52,9 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 
 ## Phase 3 -- container + release
 
-- [ ] `Dockerfile` + `compose.yaml`
-- [ ] GHCR release workflow
-- [ ] Fleet stack + public `wss://…` hostname (fleet-chezmoi)
+- [x] `Dockerfile` + `compose.yaml` + `.env.example`
+- [x] GHCR release workflow (`.github/workflows/release.yml`)
+- [ ] Fleet stack + public `wss://ferrite.skyphusion.org/ws` (fleet-chezmoi)
 - [ ] mud-bots soak (optional; after transport+combat stable)
 
 ## Smoke baselines
