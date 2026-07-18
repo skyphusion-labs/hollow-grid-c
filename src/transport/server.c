@@ -39,6 +39,7 @@
 typedef enum {
   HG_WAIT_NAME,
   HG_WAIT_RACE,
+  HG_WAIT_HUB,
   HG_PLAYING,
 } hg_session_state;
 
@@ -91,6 +92,10 @@ typedef struct {
 #define HG_MAX_CASTS 64
 #define HG_MAX_WORLDS 8
 #define HG_MAX_PENDING_COMMITS 128
+#define HG_MAX_PENDING_FALLEN 32
+#define HG_MAX_PENDING_CASTS 32
+#define HG_MAX_PENDING_LOADS 16
+#define HG_MAX_LEDGER_KINDS 32
 
 typedef struct {
   char room[32];
@@ -128,6 +133,40 @@ typedef struct {
 } hg_pending_commit;
 
 typedef struct {
+  char world[48];
+  char name[33];
+  char room[32];
+  long long at_ms;
+} hg_pending_fallen;
+
+typedef struct {
+  char world[48];
+  char sender[33];
+  char text[240];
+} hg_pending_gridcast;
+
+typedef struct {
+  char name[33];
+  int resumed;
+} hg_pending_char_load;
+
+typedef struct {
+  char name[33];
+  hg_char_sheet sheet;
+  int found;
+  int ok;
+  int resumed;
+} hg_char_load_result;
+
+typedef struct {
+  char admin[33];
+  int before;
+  int after;
+  int removed;
+  int ok;
+} hg_prune_result;
+
+typedef struct {
   pthread_t thread;
   pthread_mutex_t mutex;
   pthread_cond_t wake;
@@ -135,15 +174,43 @@ typedef struct {
   int stop;
   hg_grid *grid;
   const hg_server_config *config;
+  /* Local presence snapshot written by the event loop, reported by worker. */
   hg_grid_presence presence[64];
   size_t presence_count;
   hg_pending_commit commits[HG_MAX_PENDING_COMMITS];
   size_t commit_count;
+  hg_pending_fallen fallens[HG_MAX_PENDING_FALLEN];
+  size_t fallen_pending;
+  hg_pending_gridcast out_casts[HG_MAX_PENDING_CASTS];
+  size_t out_cast_count;
+  int tide_delta;
+  int prune_requested;
+  char prune_admin[33];
+  hg_pending_char_load loads[HG_MAX_PENDING_LOADS];
+  size_t load_count;
+  /* Incoming casts + cached hub reads for the event loop. */
   hg_grid_cast casts[HG_MAX_CASTS];
   size_t cast_count;
   int cast_cursor;
   int tide;
   int tide_ready;
+  hg_grid_world worlds[HG_MAX_WORLDS];
+  size_t world_count;
+  int worlds_ready;
+  hg_grid_presence remote_presence[64];
+  size_t remote_presence_count;
+  int remote_presence_ready;
+  int hub_ok;
+  long hub_latency_ms;
+  int hub_health_ready;
+  hg_grid_ledger_kind ledger_kinds[HG_MAX_LEDGER_KINDS];
+  size_t ledger_kind_count;
+  int ledger_total;
+  int ledger_ready;
+  hg_char_load_result load_results[HG_MAX_PENDING_LOADS];
+  size_t load_result_count;
+  hg_prune_result prune_result;
+  int prune_result_ready;
 } hg_federation_worker;
 
 typedef struct hg_session {
@@ -153,6 +220,7 @@ typedef struct hg_session {
   char target[16];
   char reply_to[33];
   int market_resolved;
+  int hub_login_resumed;
   time_t trait_ready_at;
   time_t treat_ready_at;
   hg_message *out_head;
@@ -231,8 +299,11 @@ static int find_inventory(const hg_character *character, const char *arg,
 static void seed_worlds(hg_server *server);
 static void poll_gridcasts(hg_server *server);
 static const char *player_regard(const hg_character *character);
+static void apply_hub_sheet(hg_character *character, const hg_char_sheet *sheet);
 static void merge_hub_on_login(hg_server *server, hg_character *character);
 static void commit_hub(hg_server *server, const hg_character *character);
+static void finish_login_playing(hg_session *session, hg_server *server,
+                                 int resumed);
 
 static void free_messages(hg_session *session) {
   while (session->out_head != NULL) {
@@ -400,6 +471,12 @@ static void deadline_after_ms(struct timespec *deadline, long milliseconds) {
   }
 }
 
+static int federation_has_work_locked(const hg_federation_worker *worker) {
+  return worker->commit_count > 0 || worker->fallen_pending > 0 ||
+         worker->out_cast_count > 0 || worker->tide_delta != 0 ||
+         worker->prune_requested || worker->load_count > 0;
+}
+
 static size_t take_pending_commits(hg_federation_worker *worker,
                                    hg_pending_commit *out, size_t cap) {
   pthread_mutex_lock(&worker->mutex);
@@ -426,11 +503,219 @@ static void flush_pending_commits(hg_federation_worker *worker) {
   }
 }
 
+static void flush_pending_writes(hg_federation_worker *worker) {
+  hg_pending_fallen fallens[HG_MAX_PENDING_FALLEN];
+  hg_pending_gridcast casts[HG_MAX_PENDING_CASTS];
+  size_t fallen_n = 0;
+  size_t cast_n = 0;
+  int tide_delta = 0;
+  int prune = 0;
+  char prune_admin[33];
+  prune_admin[0] = '\0';
+
+  pthread_mutex_lock(&worker->mutex);
+  fallen_n = worker->fallen_pending;
+  if (fallen_n > 0) {
+    memcpy(fallens, worker->fallens, fallen_n * sizeof(*fallens));
+    worker->fallen_pending = 0;
+  }
+  cast_n = worker->out_cast_count;
+  if (cast_n > 0) {
+    memcpy(casts, worker->out_casts, cast_n * sizeof(*casts));
+    worker->out_cast_count = 0;
+  }
+  tide_delta = worker->tide_delta;
+  worker->tide_delta = 0;
+  prune = worker->prune_requested;
+  if (prune) {
+    snprintf(prune_admin, sizeof(prune_admin), "%s", worker->prune_admin);
+    worker->prune_requested = 0;
+    worker->prune_admin[0] = '\0';
+  }
+  pthread_mutex_unlock(&worker->mutex);
+
+  for (size_t i = 0; i < fallen_n; ++i) {
+    (void)hg_grid_record_fallen(worker->grid, fallens[i].world, fallens[i].name,
+                                fallens[i].room, fallens[i].at_ms);
+  }
+  for (size_t i = 0; i < cast_n; ++i) {
+    (void)hg_grid_gridcast(worker->grid, casts[i].world, casts[i].sender,
+                           casts[i].text);
+  }
+  if (tide_delta != 0) {
+    int tide = 0;
+    if (hg_grid_shift_tide(worker->grid, tide_delta, &tide) == 0) {
+      pthread_mutex_lock(&worker->mutex);
+      worker->tide = tide;
+      worker->tide_ready = 1;
+      pthread_mutex_unlock(&worker->mutex);
+    }
+  }
+  if (prune) {
+    int before = 0;
+    int after = 0;
+    int removed = 0;
+    int ok = 0;
+    hg_grid_ledger_kind kinds[HG_MAX_LEDGER_KINDS];
+    size_t kind_n = 0;
+    if (hg_grid_ledger_stats(worker->grid, kinds, HG_MAX_LEDGER_KINDS, &kind_n,
+                             &before) == 0 &&
+        hg_grid_prune_ledger(worker->grid, &removed) == 0) {
+      ok = 1;
+      if (hg_grid_ledger_stats(worker->grid, kinds, HG_MAX_LEDGER_KINDS, &kind_n,
+                               &after) != 0) {
+        after = before - removed;
+      }
+      pthread_mutex_lock(&worker->mutex);
+      worker->ledger_kind_count = kind_n;
+      if (kind_n > 0) {
+        memcpy(worker->ledger_kinds, kinds, kind_n * sizeof(*kinds));
+      }
+      worker->ledger_total = after;
+      worker->ledger_ready = 1;
+      pthread_mutex_unlock(&worker->mutex);
+    }
+    pthread_mutex_lock(&worker->mutex);
+    snprintf(worker->prune_result.admin, sizeof(worker->prune_result.admin),
+             "%s", prune_admin);
+    worker->prune_result.before = before;
+    worker->prune_result.after = after;
+    worker->prune_result.removed = removed;
+    worker->prune_result.ok = ok;
+    worker->prune_result_ready = 1;
+    pthread_mutex_unlock(&worker->mutex);
+  }
+}
+
+static void flush_pending_loads(hg_federation_worker *worker) {
+  hg_pending_char_load loads[HG_MAX_PENDING_LOADS];
+  size_t count = 0;
+  pthread_mutex_lock(&worker->mutex);
+  count = worker->load_count;
+  if (count > 0) {
+    memcpy(loads, worker->loads, count * sizeof(*loads));
+    worker->load_count = 0;
+  }
+  pthread_mutex_unlock(&worker->mutex);
+
+  for (size_t i = 0; i < count; ++i) {
+    hg_char_load_result result;
+    memset(&result, 0, sizeof(result));
+    snprintf(result.name, sizeof(result.name), "%s", loads[i].name);
+    result.resumed = loads[i].resumed;
+    if (hg_grid_load_character(worker->grid, loads[i].name, &result.sheet,
+                               &result.found) == 0) {
+      result.ok = 1;
+    }
+    pthread_mutex_lock(&worker->mutex);
+    if (worker->load_result_count >= HG_MAX_PENDING_LOADS) {
+      memmove(worker->load_results, worker->load_results + 1,
+              (HG_MAX_PENDING_LOADS - 1) * sizeof(*worker->load_results));
+      worker->load_result_count = HG_MAX_PENDING_LOADS - 1;
+    }
+    worker->load_results[worker->load_result_count++] = result;
+    pthread_mutex_unlock(&worker->mutex);
+  }
+}
+
 static int federation_should_stop(hg_federation_worker *worker) {
   pthread_mutex_lock(&worker->mutex);
   int stop = worker->stop;
   pthread_mutex_unlock(&worker->mutex);
   return stop;
+}
+
+static void federation_refresh_caches(hg_federation_worker *worker) {
+  long latency = 0;
+  int hub_ok = hg_grid_ping(worker->grid, &latency) == 0;
+  pthread_mutex_lock(&worker->mutex);
+  worker->hub_ok = hub_ok;
+  worker->hub_latency_ms = latency;
+  worker->hub_health_ready = 1;
+  pthread_mutex_unlock(&worker->mutex);
+
+  hg_grid_cast incoming[20];
+  size_t incoming_count = 0;
+  int cursor = 0;
+  pthread_mutex_lock(&worker->mutex);
+  cursor = worker->cast_cursor;
+  pthread_mutex_unlock(&worker->mutex);
+  if (hg_grid_casts_since(worker->grid, cursor, 20, incoming, 20,
+                          &incoming_count) == 0) {
+    pthread_mutex_lock(&worker->mutex);
+    for (size_t i = 0; i < incoming_count; ++i) {
+      if (worker->cast_count >= HG_MAX_CASTS) {
+        break;
+      }
+      worker->casts[worker->cast_count++] = incoming[i];
+      if (incoming[i].id > worker->cast_cursor) {
+        worker->cast_cursor = incoming[i].id;
+      }
+    }
+    pthread_mutex_unlock(&worker->mutex);
+  }
+
+  flush_pending_writes(worker);
+  flush_pending_commits(worker);
+
+  hg_grid_presence presence[64];
+  size_t presence_count = 0;
+  pthread_mutex_lock(&worker->mutex);
+  presence_count = worker->presence_count;
+  if (presence_count > 0) {
+    memcpy(presence, worker->presence, presence_count * sizeof(*presence));
+  }
+  pthread_mutex_unlock(&worker->mutex);
+  long long at = (long long)time(NULL) * 1000;
+  (void)hg_grid_report_presence(worker->grid, worker->config->world_name,
+                                presence, presence_count, at);
+
+  hg_grid_presence remote[64];
+  size_t remote_n = 0;
+  if (hg_grid_fetch_presence(worker->grid, 60000, remote, 64, &remote_n) == 0) {
+    pthread_mutex_lock(&worker->mutex);
+    worker->remote_presence_count = remote_n;
+    if (remote_n > 0) {
+      memcpy(worker->remote_presence, remote, remote_n * sizeof(*remote));
+    }
+    worker->remote_presence_ready = 1;
+    pthread_mutex_unlock(&worker->mutex);
+  }
+
+  hg_grid_world worlds[HG_MAX_WORLDS];
+  size_t world_n = 0;
+  if (hg_grid_list_worlds(worker->grid, worlds, HG_MAX_WORLDS, &world_n) == 0) {
+    pthread_mutex_lock(&worker->mutex);
+    worker->world_count = world_n;
+    if (world_n > 0) {
+      memcpy(worker->worlds, worlds, world_n * sizeof(*worlds));
+    }
+    worker->worlds_ready = 1;
+    pthread_mutex_unlock(&worker->mutex);
+  }
+
+  int tide = 0;
+  if (hg_grid_tide(worker->grid, &tide) == 0) {
+    pthread_mutex_lock(&worker->mutex);
+    worker->tide = tide;
+    worker->tide_ready = 1;
+    pthread_mutex_unlock(&worker->mutex);
+  }
+
+  hg_grid_ledger_kind kinds[HG_MAX_LEDGER_KINDS];
+  size_t kind_n = 0;
+  int total = 0;
+  if (hg_grid_ledger_stats(worker->grid, kinds, HG_MAX_LEDGER_KINDS, &kind_n,
+                           &total) == 0) {
+    pthread_mutex_lock(&worker->mutex);
+    worker->ledger_kind_count = kind_n;
+    if (kind_n > 0) {
+      memcpy(worker->ledger_kinds, kinds, kind_n * sizeof(*kinds));
+    }
+    worker->ledger_total = total;
+    worker->ledger_ready = 1;
+    pthread_mutex_unlock(&worker->mutex);
+  }
 }
 
 static void *federation_worker_main(void *arg) {
@@ -439,52 +724,16 @@ static void *federation_worker_main(void *arg) {
   time_t last_register = 0;
 
   while (!federation_should_stop(worker)) {
+    flush_pending_loads(worker);
+    flush_pending_writes(worker);
     flush_pending_commits(worker);
+
     time_t now = time(NULL);
     if (last_poll == 0 || now - last_poll >= 2) {
-      hg_grid_cast incoming[20];
-      size_t incoming_count = 0;
-      int cursor = 0;
-      pthread_mutex_lock(&worker->mutex);
-      cursor = worker->cast_cursor;
-      pthread_mutex_unlock(&worker->mutex);
-      if (hg_grid_casts_since(worker->grid, cursor, 20, incoming, 20,
-                              &incoming_count) == 0) {
-        pthread_mutex_lock(&worker->mutex);
-        for (size_t i = 0; i < incoming_count; ++i) {
-          if (worker->cast_count >= HG_MAX_CASTS) {
-            break;
-          }
-          worker->casts[worker->cast_count++] = incoming[i];
-          if (incoming[i].id > worker->cast_cursor) {
-            worker->cast_cursor = incoming[i].id;
-          }
-        }
-        pthread_mutex_unlock(&worker->mutex);
-      }
-
+      federation_refresh_caches(worker);
+      flush_pending_loads(worker);
+      flush_pending_writes(worker);
       flush_pending_commits(worker);
-      hg_grid_presence presence[64];
-      size_t presence_count = 0;
-      pthread_mutex_lock(&worker->mutex);
-      presence_count = worker->presence_count;
-      if (presence_count > 0) {
-        memcpy(presence, worker->presence,
-               presence_count * sizeof(*presence));
-      }
-      pthread_mutex_unlock(&worker->mutex);
-      long long at = (long long)time(NULL) * 1000;
-      (void)hg_grid_report_presence(worker->grid, worker->config->world_name,
-                                    presence, presence_count, at);
-
-      flush_pending_commits(worker);
-      int tide = 0;
-      if (hg_grid_tide(worker->grid, &tide) == 0) {
-        pthread_mutex_lock(&worker->mutex);
-        worker->tide = tide;
-        worker->tide_ready = 1;
-        pthread_mutex_unlock(&worker->mutex);
-      }
       last_poll = now;
     }
 
@@ -499,7 +748,7 @@ static void *federation_worker_main(void *arg) {
     }
 
     pthread_mutex_lock(&worker->mutex);
-    if (!worker->stop && worker->commit_count == 0) {
+    if (!worker->stop && !federation_has_work_locked(worker)) {
       struct timespec deadline;
       deadline_after_ms(&deadline, 200);
       int rc = pthread_cond_timedwait(&worker->wake, &worker->mutex, &deadline);
@@ -507,6 +756,8 @@ static void *federation_worker_main(void *arg) {
     }
     pthread_mutex_unlock(&worker->mutex);
   }
+  flush_pending_loads(worker);
+  flush_pending_writes(worker);
   flush_pending_commits(worker);
   return NULL;
 }
@@ -588,7 +839,281 @@ static void report_presence(hg_server *server) {
   pthread_mutex_unlock(&worker->mutex);
 }
 
+static void queue_fallen_remote(hg_server *server, const char *name,
+                                const char *room, long long at_ms) {
+  hg_federation_worker *worker = &server->federation;
+  if (!worker->started) {
+    if (server->remote != NULL) {
+      (void)hg_grid_record_fallen(server->remote, server->config->world_name,
+                                  name, room, at_ms);
+    }
+    return;
+  }
+  pthread_mutex_lock(&worker->mutex);
+  if (worker->fallen_pending >= HG_MAX_PENDING_FALLEN) {
+    memmove(worker->fallens, worker->fallens + 1,
+            (HG_MAX_PENDING_FALLEN - 1) * sizeof(*worker->fallens));
+    worker->fallen_pending = HG_MAX_PENDING_FALLEN - 1;
+  }
+  hg_pending_fallen *entry = &worker->fallens[worker->fallen_pending++];
+  snprintf(entry->world, sizeof(entry->world), "%s",
+           server->config->world_name);
+  snprintf(entry->name, sizeof(entry->name), "%s", name);
+  snprintf(entry->room, sizeof(entry->room), "%s", room);
+  entry->at_ms = at_ms;
+  pthread_cond_signal(&worker->wake);
+  pthread_mutex_unlock(&worker->mutex);
+}
+
+static void queue_tide_shift(hg_server *server, int delta) {
+  hg_federation_worker *worker = &server->federation;
+  if (!worker->started) {
+    if (server->remote != NULL) {
+      int tide = 0;
+      if (hg_grid_shift_tide(server->remote, delta, &tide) == 0) {
+        server->tide = tide;
+        return;
+      }
+    }
+    server->tide += delta;
+    if (server->tide > HG_TIDE_CEIL) {
+      server->tide = HG_TIDE_CEIL;
+    }
+    if (server->tide < HG_TIDE_FLOOR) {
+      server->tide = HG_TIDE_FLOOR;
+    }
+    return;
+  }
+  pthread_mutex_lock(&worker->mutex);
+  worker->tide_delta += delta;
+  pthread_cond_signal(&worker->wake);
+  pthread_mutex_unlock(&worker->mutex);
+  server->tide += delta;
+  if (server->tide > HG_TIDE_CEIL) {
+    server->tide = HG_TIDE_CEIL;
+  }
+  if (server->tide < HG_TIDE_FLOOR) {
+    server->tide = HG_TIDE_FLOOR;
+  }
+}
+
+static int queue_gridcast_remote(hg_server *server, const char *sender,
+                                 const char *text) {
+  hg_federation_worker *worker = &server->federation;
+  if (!worker->started) {
+    if (server->remote == NULL) {
+      return -1;
+    }
+    return hg_grid_gridcast(server->remote, server->config->world_name, sender,
+                            text);
+  }
+  pthread_mutex_lock(&worker->mutex);
+  if (worker->hub_health_ready && !worker->hub_ok) {
+    pthread_mutex_unlock(&worker->mutex);
+    return -1;
+  }
+  if (worker->out_cast_count >= HG_MAX_PENDING_CASTS) {
+    memmove(worker->out_casts, worker->out_casts + 1,
+            (HG_MAX_PENDING_CASTS - 1) * sizeof(*worker->out_casts));
+    worker->out_cast_count = HG_MAX_PENDING_CASTS - 1;
+  }
+  hg_pending_gridcast *cast = &worker->out_casts[worker->out_cast_count++];
+  snprintf(cast->world, sizeof(cast->world), "%s", server->config->world_name);
+  snprintf(cast->sender, sizeof(cast->sender), "%s", sender);
+  snprintf(cast->text, sizeof(cast->text), "%s", text);
+  pthread_cond_signal(&worker->wake);
+  pthread_mutex_unlock(&worker->mutex);
+  return 0;
+}
+
+static int cached_worlds(hg_server *server, hg_world_info *out, size_t cap,
+                         size_t *out_count) {
+  hg_federation_worker *worker = &server->federation;
+  if (!worker->started) {
+    return -1;
+  }
+  pthread_mutex_lock(&worker->mutex);
+  if (!worker->worlds_ready) {
+    pthread_mutex_unlock(&worker->mutex);
+    return -1;
+  }
+  size_t n = worker->world_count < cap ? worker->world_count : cap;
+  for (size_t i = 0; i < n; ++i) {
+    memcpy(out[i].id, worker->worlds[i].id, sizeof(out[i].id));
+    memcpy(out[i].url, worker->worlds[i].url, sizeof(out[i].url));
+    out[i].last_seen_ms = worker->worlds[i].last_seen_ms;
+  }
+  *out_count = n;
+  pthread_mutex_unlock(&worker->mutex);
+  return 0;
+}
+
+static int cached_remote_presence(hg_server *server, hg_grid_presence *out,
+                                  size_t cap, size_t *out_count) {
+  hg_federation_worker *worker = &server->federation;
+  if (!worker->started) {
+    return -1;
+  }
+  pthread_mutex_lock(&worker->mutex);
+  if (!worker->remote_presence_ready) {
+    pthread_mutex_unlock(&worker->mutex);
+    return -1;
+  }
+  size_t n =
+      worker->remote_presence_count < cap ? worker->remote_presence_count : cap;
+  if (n > 0) {
+    memcpy(out, worker->remote_presence, n * sizeof(*out));
+  }
+  *out_count = n;
+  pthread_mutex_unlock(&worker->mutex);
+  return 0;
+}
+
+static int cached_ledger_stats(hg_server *server, hg_grid_ledger_kind *out,
+                               size_t cap, size_t *out_count, int *out_total) {
+  hg_federation_worker *worker = &server->federation;
+  if (!worker->started) {
+    return -1;
+  }
+  pthread_mutex_lock(&worker->mutex);
+  if (!worker->ledger_ready) {
+    pthread_mutex_unlock(&worker->mutex);
+    return -1;
+  }
+  size_t n = worker->ledger_kind_count < cap ? worker->ledger_kind_count : cap;
+  if (n > 0) {
+    memcpy(out, worker->ledger_kinds, n * sizeof(*out));
+  }
+  *out_count = n;
+  *out_total = worker->ledger_total;
+  pthread_mutex_unlock(&worker->mutex);
+  return 0;
+}
+
+static void queue_char_load(hg_server *server, const char *name, int resumed) {
+  hg_federation_worker *worker = &server->federation;
+  if (!worker->started) {
+    return;
+  }
+  pthread_mutex_lock(&worker->mutex);
+  for (size_t i = 0; i < worker->load_count; ++i) {
+    if (strcasecmp(worker->loads[i].name, name) == 0) {
+      worker->loads[i].resumed = resumed;
+      pthread_cond_signal(&worker->wake);
+      pthread_mutex_unlock(&worker->mutex);
+      return;
+    }
+  }
+  if (worker->load_count >= HG_MAX_PENDING_LOADS) {
+    memmove(worker->loads, worker->loads + 1,
+            (HG_MAX_PENDING_LOADS - 1) * sizeof(*worker->loads));
+    worker->load_count = HG_MAX_PENDING_LOADS - 1;
+  }
+  hg_pending_char_load *load = &worker->loads[worker->load_count++];
+  snprintf(load->name, sizeof(load->name), "%s", name);
+  load->resumed = resumed;
+  pthread_cond_signal(&worker->wake);
+  pthread_mutex_unlock(&worker->mutex);
+}
+
+static void queue_ledger_prune(hg_server *server, const char *admin) {
+  hg_federation_worker *worker = &server->federation;
+  if (!worker->started) {
+    return;
+  }
+  pthread_mutex_lock(&worker->mutex);
+  worker->prune_requested = 1;
+  snprintf(worker->prune_admin, sizeof(worker->prune_admin), "%s", admin);
+  pthread_cond_signal(&worker->wake);
+  pthread_mutex_unlock(&worker->mutex);
+}
+
+static void drain_char_load_results(hg_server *server) {
+  hg_federation_worker *worker = &server->federation;
+  hg_char_load_result results[HG_MAX_PENDING_LOADS];
+  size_t count = 0;
+  pthread_mutex_lock(&worker->mutex);
+  count = worker->load_result_count;
+  if (count > 0) {
+    memcpy(results, worker->load_results, count * sizeof(*results));
+    worker->load_result_count = 0;
+  }
+  pthread_mutex_unlock(&worker->mutex);
+
+  for (size_t i = 0; i < count; ++i) {
+    hg_session *session = NULL;
+    for (hg_session *s = server->sessions; s != NULL; s = s->next) {
+      if (s->state == HG_WAIT_HUB &&
+          strcasecmp(s->character.name, results[i].name) == 0) {
+        session = s;
+        break;
+      }
+    }
+    if (session == NULL) {
+      continue;
+    }
+    if (results[i].ok && results[i].found) {
+      apply_hub_sheet(&session->character, &results[i].sheet);
+    }
+    finish_login_playing(session, server, results[i].resumed);
+  }
+}
+
+static void drain_prune_results(hg_server *server) {
+  hg_federation_worker *worker = &server->federation;
+  hg_prune_result result;
+  int ready = 0;
+  pthread_mutex_lock(&worker->mutex);
+  if (worker->prune_result_ready) {
+    result = worker->prune_result;
+    worker->prune_result_ready = 0;
+    ready = 1;
+  }
+  pthread_mutex_unlock(&worker->mutex);
+  if (!ready) {
+    return;
+  }
+  for (hg_session *session = server->sessions; session != NULL;
+       session = session->next) {
+    if (session->state != HG_PLAYING ||
+        strcasecmp(session->character.name, result.admin) != 0) {
+      continue;
+    }
+    if (!result.ok) {
+      queue_text(session,
+                 "The hub is unreachable; the deep memory cannot be tended.");
+      return;
+    }
+    cJSON *payload = json_object();
+    cJSON_AddNumberToObject(payload, "before", result.before);
+    cJSON_AddNumberToObject(payload, "after", result.after);
+    cJSON_AddNumberToObject(payload, "removed", result.removed);
+    cJSON *kinds = cJSON_AddArrayToObject(payload, "kinds");
+    hg_grid_ledger_kind cached[HG_MAX_LEDGER_KINDS];
+    size_t kind_n = 0;
+    int total = 0;
+    if (cached_ledger_stats(server, cached, HG_MAX_LEDGER_KINDS, &kind_n,
+                            &total) == 0) {
+      for (size_t i = 0; i < kind_n; ++i) {
+        cJSON *row = cJSON_CreateObject();
+        cJSON_AddStringToObject(row, "kind", cached[i].kind);
+        cJSON_AddNumberToObject(row, "count", cached[i].count);
+        cJSON_AddItemToArray(kinds, row);
+      }
+    }
+    queue_event(session, "grid.ledger_pruned", payload);
+    queue_text(session, "Ambient traces pruned (%d -> %d).", result.before,
+               result.after);
+    return;
+  }
+}
+
 static void poll_gridcasts(hg_server *server) {
+  if (server->federation.started) {
+    drain_char_load_results(server);
+    drain_prune_results(server);
+  }
+
   time_t now = time(NULL);
   if (server->last_fed_poll != 0 && now - server->last_fed_poll < 2) {
     return;
@@ -917,6 +1442,12 @@ static const char *player_regard(const hg_character *character) {
 }
 
 static void session_register(hg_server *server, hg_session *session) {
+  for (hg_session *existing = server->sessions; existing != NULL;
+       existing = existing->next) {
+    if (existing == session) {
+      return;
+    }
+  }
   session->next = server->sessions;
   server->sessions = session;
 }
@@ -1248,16 +1779,9 @@ static void arm_heartbeat(hg_session *session) {
   lws_set_timer_usecs(session->wsi, HG_HEARTBEAT_USEC);
 }
 
-static void finish_login(hg_session *session, hg_server *server, int resumed) {
+static void finish_login_playing(hg_session *session, hg_server *server,
+                                 int resumed) {
   session->state = HG_PLAYING;
-  if (hg_world_room(session->character.room) == NULL) {
-    snprintf(session->character.room, sizeof(session->character.room), "nexus");
-  }
-  if (session->character.position[0] == '\0') {
-    snprintf(session->character.position, sizeof(session->character.position),
-             "standing");
-  }
-  merge_hub_on_login(server, &session->character);
   queue_text(session,
              resumed ? "The Grid finds your old charge, %s."
                      : "The field takes your measure, %s. Type help for verbs.",
@@ -1266,6 +1790,25 @@ static void finish_login(hg_session *session, hg_server *server, int resumed) {
   send_world_state(session, server);
   send_scene(session, server);
   arm_heartbeat(session);
+}
+
+static void finish_login(hg_session *session, hg_server *server, int resumed) {
+  if (hg_world_room(session->character.room) == NULL) {
+    snprintf(session->character.room, sizeof(session->character.room), "nexus");
+  }
+  if (session->character.position[0] == '\0') {
+    snprintf(session->character.position, sizeof(session->character.position),
+             "standing");
+  }
+  if (server->remote != NULL && server->federation.started) {
+    session->state = HG_WAIT_HUB;
+    session->hub_login_resumed = resumed;
+    session_register(server, session);
+    queue_char_load(server, session->character.name, resumed);
+    return;
+  }
+  merge_hub_on_login(server, &session->character);
+  finish_login_playing(session, server, resumed);
 }
 
 static char *trim(char *text) {
@@ -1413,9 +1956,8 @@ static void combat_round(hg_session *session, hg_server *server) {
     server->fallen[0].at = time(NULL);
     server->fallen_count++;
     if (server->remote != NULL) {
-      (void)hg_grid_record_fallen(server->remote, server->config->world_name,
-                                  session->character.name, death_room,
-                                  (long long)server->fallen[0].at * 1000);
+      queue_fallen_remote(server, session->character.name, death_room,
+                          (long long)server->fallen[0].at * 1000);
     }
 
     session->character.hp = session->character.max_hp;
@@ -1485,11 +2027,8 @@ static int race_is_hunted(const char *race) {
 
 static void contribute_tide(hg_server *server, int delta) {
   if (server->remote != NULL) {
-    int tide = 0;
-    if (hg_grid_shift_tide(server->remote, delta, &tide) == 0) {
-      server->tide = tide;
-      return;
-    }
+    queue_tide_shift(server, delta);
+    return;
   }
   server->tide += delta;
   if (server->tide > HG_TIDE_CEIL) {
@@ -2102,16 +2641,7 @@ static void cmd_reckoning(hg_session *session, hg_server *server) {
 }
 
 static void cmd_war(hg_session *session, hg_server *server) {
-  if (server->remote != NULL) {
-    int tide = 0;
-    if (hg_grid_tide(server->remote, &tide) == 0) {
-      server->tide = tide;
-    } else {
-      queue_text(session,
-                 "The deep Grid is silent; you can't read the war from here.");
-      return;
-    }
-  }
+  /* Tide is kept fresh by the federation worker; never dial the hub here. */
   int tide = server->tide;
   const char *state = "the war hangs in perfect, brutal balance.";
   if (tide <= -50) {
@@ -2155,8 +2685,7 @@ static void cmd_gridcast(hg_session *session, hg_server *server, const char *arg
     return;
   }
   if (server->remote != NULL) {
-    if (hg_grid_gridcast(server->remote, server->config->world_name,
-                         session->character.name, arg) != 0) {
+    if (queue_gridcast_remote(server, session->character.name, arg) != 0) {
       queue_text(session,
                  "The Grid swallows your words; the network is unreachable.");
       return;
@@ -2268,35 +2797,8 @@ static void merge_hub_on_login(hg_server *server, hg_character *character) {
 }
 
 static void cmd_whoami(hg_session *session, hg_server *server) {
-  char local_faction[16];
-  char local_title[48];
-  int local_morality = session->character.morality;
-  snprintf(local_faction, sizeof(local_faction), "%s",
-           session->character.faction);
-  snprintf(local_title, sizeof(local_title), "%s", session->character.title);
-  if (server->remote != NULL) {
-    hg_char_sheet sheet;
-    int found = 0;
-    if (hg_grid_load_character(server->remote, session->character.name, &sheet,
-                               &found) == 0) {
-      apply_hub_sheet(&session->character, &sheet);
-      if (strcmp(local_faction, "ally") == 0 ||
-          strcmp(local_faction, "front") == 0) {
-        snprintf(session->character.faction, sizeof(session->character.faction),
-                 "%s", local_faction);
-      }
-      if (local_morality != 0 && session->character.morality == 0 &&
-          sheet.morality == 0) {
-        session->character.morality = local_morality;
-      }
-      if (local_title[0] != '\0') {
-        snprintf(session->character.title, sizeof(session->character.title),
-                 "%s", local_title);
-      }
-    } else {
-      queue_text(session, "(the Grid is unreachable; showing your local self)");
-    }
-  }
+  /* Identity was merged from the hub at login (async). Do not re-dial here. */
+  (void)server;
   const hg_character *c = &session->character;
   cJSON *payload = json_object();
   cJSON_AddNumberToObject(payload, "level", c->level);
@@ -2325,24 +2827,20 @@ static void cmd_whoami(hg_session *session, hg_server *server) {
 }
 
 static void cmd_worlds(hg_session *session, hg_server *server) {
-  hg_grid_world remote_worlds[HG_MAX_WORLDS];
-  size_t remote_count = 0;
   const hg_world_info *list = server->worlds;
   size_t count = server->world_count;
   hg_world_info converted[HG_MAX_WORLDS];
   if (server->remote != NULL) {
-    if (hg_grid_list_worlds(server->remote, remote_worlds, HG_MAX_WORLDS,
-                            &remote_count) != 0) {
+    size_t remote_count = 0;
+    if (cached_worlds(server, converted, HG_MAX_WORLDS, &remote_count) == 0) {
+      list = converted;
+      count = remote_count;
+    } else if (server->federation.started) {
+      /* Cache still cold; fall through to local seed rather than stall. */
+    } else {
       queue_text(session, "The Grid is silent; the registry is out of reach.");
       return;
     }
-    for (size_t i = 0; i < remote_count; ++i) {
-      memcpy(converted[i].id, remote_worlds[i].id, sizeof(converted[i].id));
-      memcpy(converted[i].url, remote_worlds[i].url, sizeof(converted[i].url));
-      converted[i].last_seen_ms = remote_worlds[i].last_seen_ms;
-    }
-    list = converted;
-    count = remote_count;
   }
   long long now = (long long)time(NULL) * 1000;
   cJSON *payload = json_object();
@@ -2387,19 +2885,13 @@ static int cmd_travel(hg_session *session, hg_server *server, const char *arg) {
   size_t world_count = server->world_count;
   memcpy(worlds, server->worlds, sizeof(server->worlds[0]) * world_count);
   if (server->remote != NULL) {
-    hg_grid_world remote_worlds[HG_MAX_WORLDS];
     size_t remote_count = 0;
-    if (hg_grid_list_worlds(server->remote, remote_worlds, HG_MAX_WORLDS,
-                            &remote_count) != 0) {
+    if (cached_worlds(server, worlds, HG_MAX_WORLDS, &remote_count) == 0) {
+      world_count = remote_count;
+    } else if (!server->federation.started) {
       queue_text(session,
                  "The Grid won't answer; travel is impossible right now.");
       return 0;
-    }
-    world_count = remote_count;
-    for (size_t i = 0; i < remote_count; ++i) {
-      memcpy(worlds[i].id, remote_worlds[i].id, sizeof(worlds[i].id));
-      memcpy(worlds[i].url, remote_worlds[i].url, sizeof(worlds[i].url));
-      worlds[i].last_seen_ms = remote_worlds[i].last_seen_ms;
     }
   }
   char needle[64];
@@ -2816,10 +3308,11 @@ static void cmd_gridstats(hg_session *session, hg_server *server) {
     return;
   }
   if (server->remote != NULL) {
-    hg_grid_ledger_kind kinds[32];
+    hg_grid_ledger_kind kinds[HG_MAX_LEDGER_KINDS];
     size_t kind_n = 0;
     int total = 0;
-    if (hg_grid_ledger_stats(server->remote, kinds, 32, &kind_n, &total) != 0) {
+    if (cached_ledger_stats(server, kinds, HG_MAX_LEDGER_KINDS, &kind_n,
+                            &total) != 0) {
       queue_text(session, "The hub is unreachable; the deep memory cannot be read.");
       return;
     }
@@ -2877,42 +3370,13 @@ static void cmd_gridprune(hg_session *session, hg_server *server) {
     return;
   }
   if (server->remote != NULL) {
-    hg_grid_ledger_kind before_kinds[32];
-    size_t before_n = 0;
-    int before_total = 0;
-    if (hg_grid_ledger_stats(server->remote, before_kinds, 32, &before_n,
-                             &before_total) != 0) {
+    if (!server->federation.started) {
       queue_text(session,
                  "The hub is unreachable; the deep memory cannot be tended.");
       return;
     }
-    int removed = 0;
-    if (hg_grid_prune_ledger(server->remote, &removed) != 0) {
-      queue_text(session,
-                 "The hub is unreachable; the deep memory cannot be tended.");
-      return;
-    }
-    hg_grid_ledger_kind after_kinds[32];
-    size_t after_n = 0;
-    int after_total = 0;
-    if (hg_grid_ledger_stats(server->remote, after_kinds, 32, &after_n,
-                             &after_total) != 0) {
-      after_total = before_total - removed;
-    }
-    cJSON *payload = json_object();
-    cJSON_AddNumberToObject(payload, "before", before_total);
-    cJSON_AddNumberToObject(payload, "after", after_total);
-    cJSON_AddNumberToObject(payload, "removed", removed);
-    cJSON *kinds = cJSON_AddArrayToObject(payload, "kinds");
-    for (size_t i = 0; i < after_n; ++i) {
-      cJSON *row = cJSON_CreateObject();
-      cJSON_AddStringToObject(row, "kind", after_kinds[i].kind);
-      cJSON_AddNumberToObject(row, "count", after_kinds[i].count);
-      cJSON_AddItemToArray(kinds, row);
-    }
-    queue_event(session, "grid.ledger_pruned", payload);
-    queue_text(session, "Ambient traces pruned (%d -> %d).", before_total,
-               after_total);
+    queue_ledger_prune(server, session->character.name);
+    queue_text(session, "Prune sent into the deep Grid; hold a moment.");
     return;
   }
   size_t before = server->trace_count;
@@ -3488,8 +3952,7 @@ static void cmd_who(hg_session *session, hg_server *server) {
   if (server->remote != NULL) {
     hg_grid_presence remote[64];
     size_t remote_n = 0;
-    if (hg_grid_fetch_presence(server->remote, 60000, remote, 64, &remote_n) ==
-        0) {
+    if (cached_remote_presence(server, remote, 64, &remote_n) == 0) {
       for (size_t i = 0; i < remote_n; ++i) {
         if (strcmp(remote[i].world, server->config->world_name) == 0) {
           continue;
@@ -4208,6 +4671,9 @@ static void handle_command(hg_session *session, hg_server *server,
   case HG_WAIT_RACE:
     handle_race(session, server, command);
     break;
+  case HG_WAIT_HUB:
+    /* Hub CharSheet load in flight; ignore commands until merge completes. */
+    break;
   case HG_PLAYING:
     handle_play(session, server, command);
     break;
@@ -4248,7 +4714,21 @@ static int handle_http(struct lws *wsi, hg_server *server, const char *path) {
     const char *mode = "local";
     if (server->remote != NULL) {
       mode = "remote";
-      hub_ok = hg_grid_ping(server->remote, &latency) == 0;
+      hg_federation_worker *worker = &server->federation;
+      if (worker->started) {
+        pthread_mutex_lock(&worker->mutex);
+        if (worker->hub_health_ready) {
+          hub_ok = worker->hub_ok;
+          latency = worker->hub_latency_ms;
+        } else {
+          /* Worker has not probed yet; report optimistic until first poll. */
+          hub_ok = 1;
+          latency = 0;
+        }
+        pthread_mutex_unlock(&worker->mutex);
+      } else {
+        hub_ok = 0;
+      }
     }
     snprintf(
         body, sizeof(body),
