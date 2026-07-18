@@ -3,10 +3,12 @@
 #include <cjson/cJSON.h>
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 static int make_dir(const char *path) {
   if (mkdir(path, 0755) == 0 || errno == EEXIST) {
@@ -246,8 +248,15 @@ int hg_store_save(const hg_store *store, const hg_character *character) {
     return -1;
   }
 
-  FILE *file = fopen(temp_path, "wb");
+  int fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  if (fd < 0) {
+    free(json);
+    return -1;
+  }
+  FILE *file = fdopen(fd, "wb");
   if (file == NULL) {
+    close(fd);
+    remove(temp_path);
     free(json);
     return -1;
   }
