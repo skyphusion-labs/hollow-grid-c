@@ -14,9 +14,10 @@ static void usage(const char *argv0) {
           "  --addr HOST:PORT     listen address (default 0.0.0.0:8792)\n"
           "  --world-name NAME    federation display name (default Ferrite Wastes)\n"
           "  --data DIR           character data directory (default data)\n"
+          "  --admins LIST        comma-separated keeper names (default skyphusion)\n"
           "  --help, -h           show this help\n"
           "\n"
-          "Environment: LISTEN_ADDR, WORLD_NAME, DATA_DIR\n"
+          "Environment: LISTEN_ADDR, WORLD_NAME, DATA_DIR, ADMINS\n"
           "Contract: the-hollow-grid/docs/protocol.md\n",
           argv0);
 }
@@ -60,6 +61,7 @@ int main(int argc, char **argv) {
   const char *address = env_or("LISTEN_ADDR", "0.0.0.0:8792");
   const char *world_name = env_or("WORLD_NAME", "Ferrite Wastes");
   const char *data_dir = env_or("DATA_DIR", "data");
+  const char *admins = env_or("ADMINS", "skyphusion");
 
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -76,6 +78,8 @@ int main(int argc, char **argv) {
       world_name = argv[++i];
     } else if (strcmp(argv[i], "--data") == 0) {
       data_dir = argv[++i];
+    } else if (strcmp(argv[i], "--admins") == 0) {
+      admins = argv[++i];
     } else {
       fprintf(stderr, "unknown argument: %s (try --help)\n", argv[i]);
       return 2;
@@ -97,6 +101,7 @@ int main(int argc, char **argv) {
       .port = port,
       .world_name = world_name,
       .data_dir = data_dir,
+      .admins = admins,
   };
   return hg_server_run(&config);
 }
