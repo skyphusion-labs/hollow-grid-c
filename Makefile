@@ -5,7 +5,7 @@ CPPFLAGS ?= -Iinclude
 LDFLAGS ?=
 LDLIBS ?=
 
-DEPS := libwebsockets libcjson openssl
+DEPS := libwebsockets libcjson openssl libcurl
 CPPFLAGS += $(shell $(PKG_CONFIG) --cflags $(DEPS))
 LDLIBS += $(shell $(PKG_CONFIG) --libs $(DEPS))
 
@@ -23,6 +23,7 @@ TEST_BIN := $(BUILD)/test-core
 SRC := \
 	src/main.c \
 	src/event/event.c \
+	src/grid/remote.c \
 	src/store/store.c \
 	src/transport/server.c \
 	src/world/items.c \

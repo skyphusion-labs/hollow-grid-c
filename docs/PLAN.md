@@ -45,10 +45,10 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 ## Phase 2 -- federation
 
 - [x] LocalHub federation fallback (gridcast poll, seeded worlds/Saltreach, whoami)
-- [ ] Remote Grid Hub HTTP/JSON client (`GRID_HUB_URL`)
-- [ ] Federation loop over RemoteHub (register, presence, cast relay, tide cache)
-- [ ] Canonical CharSheet merge on login / commit on persist (hub-backed)
-- [ ] Live hub smoke with a second world (`DUSTFALL_URL`)
+- [x] Remote Grid Hub HTTP/JSON client (`GRID_HUB_URL` via libcurl)
+- [x] Federation loop over RemoteHub (register, presence, cast relay, tide cache)
+- [x] Canonical CharSheet merge on login / commit on disconnect+travel
+- [ ] Live hub smoke with a second world (`DUSTFALL_URL`) -- needs hub token + Dustfall
 
 ## Phase 3 -- container + release
 
@@ -69,8 +69,10 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 | Local Phase 1e (`127.0.0.1:8792`) | 126 | 27 | 1 | Moral arc: stray/return, forgive, defy, reckoning, local tide |
 | Local Phase 1f (`127.0.0.1:8792`) | 146 | 7 | 1 | Support: wall, cache/gather, give, treat, witness, listen echo, ledger |
 | Local Phase 2a (`127.0.0.1:8792`) | 153 | 0 | 1 | LocalHub federation: gridcast, whoami, worlds/travel; skip = Dustfall |
+| Local Phase 2b (`127.0.0.1:8792`) | 153 | 0 | 1 | RemoteHub client wired; standalone still LocalHub when unset |
 
 **Parity targets:** Rust Choir (Go) and Verdigris Spool (Python) prod baselines on the same upstream suite.
 
-Standalone scoreboard matches Verdigris Spool's local baseline. Remaining Phase 2
-work is the live RemoteHub client when `GRID_HUB_URL` is set.
+Standalone scoreboard matches Verdigris Spool's local baseline. Set `GRID_HUB_URL`
+(+ `GRID_HUB_TOKEN`) to join the live hub; Phase 12 Dustfall smoke still needs a
+reachable second world.
