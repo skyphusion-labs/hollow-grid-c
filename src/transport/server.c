@@ -63,6 +63,7 @@ typedef struct hg_session {
   char target[16];
   char reply_to[33];
   int market_resolved;
+  time_t trait_ready_at;
   hg_message *out_head;
   hg_message *out_tail;
   char input[512];
@@ -606,8 +607,8 @@ static void send_actions(hg_session *session, hg_server *server,
     cJSON_AddStringToObject(talk, "kind", "social");
     cJSON_AddItemToArray(actions, talk);
     cJSON *dust = cJSON_CreateObject();
-    cJSON_AddStringToObject(dust, "verb", "buy");
-    cJSON_AddStringToObject(dust, "label", "buy dust for 5 gold");
+    cJSON_AddStringToObject(dust, "verb", "buy dust");
+    cJSON_AddStringToObject(dust, "label", "buy dust for 10 gold");
     cJSON_AddStringToObject(dust, "kind", "vice");
     cJSON_AddItemToArray(actions, dust);
   }
@@ -1186,13 +1187,449 @@ static void cmd_stand(hg_session *session) {
   send_vitals(session);
 }
 
+#define HG_DUST_COST 10
+
+static int contains_ci(const char *haystack, const char *needle) {
+  if (haystack == NULL || needle == NULL || needle[0] == '\0') {
+    return 0;
+  }
+  for (const char *h = haystack; *h != '\0'; ++h) {
+    const char *a = h;
+    const char *b = needle;
+    while (*a != '\0' && *b != '\0' &&
+           tolower((unsigned char)*a) == tolower((unsigned char)*b)) {
+      ++a;
+      ++b;
+    }
+    if (*b == '\0') {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+typedef struct {
+  const char *id;
+  int price;
+} hg_tinker_stock;
+
+static const hg_tinker_stock k_tinker_stock[] = {
+    {"helm", 14},
+    {"plating", 18},
+    {"rebar", 20},
+};
+static const size_t k_tinker_stock_count =
+    sizeof(k_tinker_stock) / sizeof(k_tinker_stock[0]);
+
+static int find_inventory(const hg_character *character, const char *arg,
+                          char *out_id, size_t out_size) {
+  if (character == NULL || arg == NULL || arg[0] == '\0') {
+    return -1;
+  }
+  for (size_t i = 0; i < character->inventory_count; ++i) {
+    if (strcasecmp(character->inventory[i], arg) == 0) {
+      snprintf(out_id, out_size, "%s", character->inventory[i]);
+      return 0;
+    }
+  }
+  for (size_t i = 0; i < character->inventory_count; ++i) {
+    const char *name = hg_item_name(character->inventory[i]);
+    if (name != NULL && contains_ci(name, arg)) {
+      snprintf(out_id, out_size, "%s", character->inventory[i]);
+      return 0;
+    }
+  }
+  return -1;
+}
+
+static int tinker_price(const char *arg, char *out_id, size_t out_size) {
+  if (arg == NULL || arg[0] == '\0') {
+    return -1;
+  }
+  for (size_t i = 0; i < k_tinker_stock_count; ++i) {
+    if (strcasecmp(k_tinker_stock[i].id, arg) == 0) {
+      snprintf(out_id, out_size, "%s", k_tinker_stock[i].id);
+      return k_tinker_stock[i].price;
+    }
+    const char *name = hg_item_name(k_tinker_stock[i].id);
+    if (name != NULL && contains_ci(name, arg)) {
+      snprintf(out_id, out_size, "%s", k_tinker_stock[i].id);
+      return k_tinker_stock[i].price;
+    }
+  }
+  return -1;
+}
+
+static void cmd_list(hg_session *session) {
+  if (strcmp(session->character.room, "workshop") != 0) {
+    queue_text(session, "There is no one here selling anything.");
+    return;
+  }
+  queue_text(session, "The tinker's wares, laid out on an oily cloth:");
+  for (size_t i = 0; i < k_tinker_stock_count; ++i) {
+    queue_text(session, "  %s -- %d gold", hg_item_name(k_tinker_stock[i].id),
+               k_tinker_stock[i].price);
+  }
+}
+
+static void cmd_buy(hg_session *session, hg_server *server, const char *arg) {
+  if (strcmp(session->character.room, "tavern") == 0) {
+    if (arg == NULL || !contains_ci(arg, "dust")) {
+      queue_text(session, "The dealer only deals one thing: dust. (\"buy dust\")");
+      return;
+    }
+    if (session->character.gold < HG_DUST_COST) {
+      queue_text(session, "The dealer sneers. \"%d gold, no credit.\" You're short.",
+                 HG_DUST_COST);
+      return;
+    }
+    session->character.gold -= HG_DUST_COST;
+    hg_character_add_item(&session->character, "dust");
+    hg_store_save(&server->store, &session->character);
+    queue_text(session,
+               "The dealer slips you a packet of dust. (-%d gold, gold: %d)",
+               HG_DUST_COST, session->character.gold);
+    send_vitals(session);
+    return;
+  }
+  if (strcmp(session->character.room, "workshop") != 0) {
+    queue_text(session, "There is nothing to buy here.");
+    return;
+  }
+  char item_id[16];
+  int price = tinker_price(arg, item_id, sizeof(item_id));
+  if (price < 0) {
+    queue_text(session, "The tinker doesn't sell that.");
+    return;
+  }
+  if (session->character.gold < price) {
+    queue_text(session,
+               "You can't afford that -- it is %d gold and you have %d.", price,
+               session->character.gold);
+    return;
+  }
+  if (hg_character_add_item(&session->character, item_id) != 0) {
+    queue_text(session, "Your pack is full.");
+    return;
+  }
+  session->character.gold -= price;
+  hg_store_save(&server->store, &session->character);
+  queue_text(session, "The tinker hands you %s and pockets your coin.",
+             hg_item_name(item_id));
+  send_vitals(session);
+}
+
+static void cmd_sell_item(hg_session *session, hg_server *server,
+                          const char *arg) {
+  if (strcmp(session->character.room, "market") != 0) {
+    queue_text(session, "You can't do that here.");
+    return;
+  }
+  if (strcmp(session->character.faction, "front") == 0) {
+    queue_text(session,
+               "The vendor drone's optic flares red. \"Cinder Front. We "
+               "remember Scrap Market. We don't trade with your kind.\" It "
+               "turns its back on you, and the stalls nearby go quiet.");
+    return;
+  }
+  if (arg == NULL || arg[0] == '\0') {
+    queue_text(session, "Sell what?");
+    return;
+  }
+  char item_id[16];
+  if (find_inventory(&session->character, arg, item_id, sizeof(item_id)) != 0) {
+    queue_text(session, "You aren't carrying \"%s\".", arg);
+    return;
+  }
+  const hg_item *item = hg_item_by_id(item_id);
+  int base = item != NULL ? item->value : 0;
+  if (base <= 0) {
+    queue_text(session, "The vendor drone won't touch %s.", hg_item_name(item_id));
+    return;
+  }
+  int value = base;
+  if (strcmp(session->character.faction, "ally") == 0) {
+    value = (base * 12) / 10;
+  }
+  hg_character_remove_item(&session->character, item_id);
+  session->character.gold += value;
+  hg_store_save(&server->store, &session->character);
+  if (value > base) {
+    queue_text(session, "You sell %s for %d gold. (the elves see you right)",
+               hg_item_name(item_id), value);
+  } else {
+    queue_text(session, "You sell %s for %d gold.", hg_item_name(item_id),
+               value);
+  }
+  send_vitals(session);
+}
+
+static void cmd_use(hg_session *session, hg_server *server, const char *arg) {
+  if (arg == NULL || arg[0] == '\0') {
+    queue_text(session, "Use what?");
+    return;
+  }
+  char item_id[16];
+  if (find_inventory(&session->character, arg, item_id, sizeof(item_id)) != 0) {
+    queue_text(session, "You aren't carrying \"%s\".", arg);
+    return;
+  }
+  if (strcmp(item_id, "dust") == 0) {
+    hg_character_remove_item(&session->character, "dust");
+    session->character.hp = session->character.max_hp;
+    session->character.morality -= 10;
+    session->character.addiction += 1;
+    hg_store_save(&server->store, &session->character);
+    queue_text(session,
+               "The dust hits like a sunrise behind your eyes. Pain forgotten, "
+               "body humming, you feel whole again. (HP %d/%d)",
+               session->character.hp, session->character.max_hp);
+    if (session->character.addiction >= 3) {
+      queue_text(session,
+                 "But the wanting is louder now. Your hands won't stop shaking "
+                 "when it fades.");
+    }
+    send_vitals(session);
+    send_affects(session);
+    return;
+  }
+  if (strcmp(item_id, "antidote") == 0) {
+    queue_text(session, "You aren't poisoned. Best to save it.");
+    return;
+  }
+  queue_text(session, "You can't figure out how to use %s.",
+             hg_item_name(item_id));
+}
+
+static void cmd_talk(hg_session *session, hg_server *server) {
+  const char *room = session->character.room;
+  (void)server;
+  if (strcmp(room, "tavern") == 0) {
+    queue_text(session,
+               "The dealer rolls a packet of dust between his fingers: \"First "
+               "taste eases any pain, friend. Just say buy dust.\"");
+    queue_text(session,
+               "Across the room the tavern wench catches your eye and tilts "
+               "her head toward the back rooms.");
+    queue_text(session, "(You could buy/use dust, carouse, or resist.)");
+    return;
+  }
+  if (strcmp(room, "workshop") == 0) {
+    queue_text(session,
+               "The tinker doesn't look up from their soldering. \"Salvage's on "
+               "the racks, prices on the list. Say 'list', say 'buy'. I don't "
+               "haggle and I don't chat.\"");
+    return;
+  }
+  if (strcmp(room, "market") == 0) {
+    if (strcmp(session->character.faction, "none") == 0) {
+      queue_text(session,
+                 "A Cinder Front recruiter bellows from a crate: \"The wastes "
+                 "are OURS! Round up every unregistered elf and drive them "
+                 "out!\"");
+      queue_text(session,
+                 "A frightened elf refugee murmurs at your side: \"Please, I "
+                 "was born here. Don't let them take me.\"");
+      queue_text(session, "(You could join the Front, or defend the refugees.)");
+    } else if (strcmp(session->character.faction, "front") == 0) {
+      queue_text(session,
+                 "The recruiter nods at you, one of his own now. The square has "
+                 "gone quiet and afraid.");
+    } else {
+      queue_text(session,
+                 "An elf refugee presses your hand in silent thanks. The "
+                 "recruiter is nowhere in sight.");
+    }
+    return;
+  }
+  if (strcmp(room, "dais") == 0) {
+    if (strcmp(session->character.faction, "ally") == 0) {
+      queue_text(session,
+                 "The Ashmonger laughs, low and delighted. \"The elf-lover "
+                 "walked right into my house. Bold. I am going to wear you as a "
+                 "banner.\" There is no talking your way out of this -- only "
+                 "steel.");
+    } else if (strcmp(session->character.faction, "front") == 0) {
+      queue_text(session,
+                 "The Ashmonger claps a heavy hand on your shoulder. \"You came "
+                 "far for the cause. Kneel and take your place at my right hand "
+                 "-- or find your spine and 'defy' me, here and now. Choose "
+                 "what you are.\"");
+    } else {
+      queue_text(session,
+                 "The Ashmonger spits. \"Pledge to the Front or get off my "
+                 "dais. I have no patience for fence-sitters.\"");
+    }
+    return;
+  }
+  if (strcmp(room, "floodgate") == 0) {
+    queue_text(session,
+               "A stranded operator looks up from a dead console: \"I can't "
+               "leave until this node is restored, and the Custodian dragged "
+               "the core shard down into the Core Lab.\"");
+    return;
+  }
+  if (strcmp(room, "waystation") == 0) {
+    queue_text(session,
+               "The medic studies you. \"We tend friends of the free folk. Pick "
+               "a side, wanderer, and we will see.\"");
+    return;
+  }
+  queue_text(session, "You can't do that here.");
+}
+
+static void cmd_title(hg_session *session, hg_server *server, const char *arg) {
+  if (arg == NULL || arg[0] == '\0') {
+    session->character.title[0] = '\0';
+    queue_text(session, "Your title is cleared.");
+  } else {
+    snprintf(session->character.title, sizeof(session->character.title), "%s",
+             arg);
+    queue_text(session, "Your title is now: %s.", session->character.title);
+  }
+  hg_store_save(&server->store, &session->character);
+}
+
+static void cmd_who(hg_session *session, hg_server *server) {
+  cJSON *payload = json_object();
+  cJSON *players = cJSON_AddArrayToObject(payload, "players");
+  char line[512] = "Online:";
+  size_t used = strlen(line);
+  int any = 0;
+  for (hg_session *other = server->sessions; other != NULL; other = other->next) {
+    if (other->state != HG_PLAYING) {
+      continue;
+    }
+    cJSON *row = cJSON_CreateObject();
+    cJSON_AddStringToObject(row, "world", server->config->world_name);
+    cJSON_AddStringToObject(row, "name", other->character.name);
+    cJSON_AddStringToObject(row, "regard", player_regard(&other->character));
+    cJSON_AddBoolToObject(row, "here", 1);
+    cJSON_AddStringToObject(row, "title", other->character.title);
+    cJSON_AddItemToArray(players, row);
+
+    char entry[96];
+    if (other->character.title[0] != '\0') {
+      snprintf(entry, sizeof(entry), "%s %s", other->character.name,
+               other->character.title);
+    } else {
+      snprintf(entry, sizeof(entry), "%s", other->character.name);
+    }
+    const char *regard = player_regard(&other->character);
+    if (regard[0] != '\0') {
+      size_t entry_len = strlen(entry);
+      snprintf(entry + entry_len, sizeof(entry) - entry_len, " (%s)", regard);
+    }
+    int written =
+        snprintf(line + used, sizeof(line) - used, "%s %s", any ? ";" : "",
+                 entry);
+    if (written > 0 && (size_t)written < sizeof(line) - used) {
+      used += (size_t)written;
+    }
+    any = 1;
+  }
+  queue_event(session, "grid.who", payload);
+  if (!any) {
+    queue_text(session, "No one else walks the wastes right now.");
+  } else {
+    queue_text(session, "%s.", line);
+  }
+}
+
+static void cmd_ability(hg_session *session, hg_server *server) {
+  time_t now = time(NULL);
+  if (session->trait_ready_at > now) {
+    long left = (long)(session->trait_ready_at - now);
+    if (left < 1) {
+      left = 1;
+    }
+    queue_text(session, "Requisition is still recharging. (%lds)", left);
+    return;
+  }
+  if (strcmp(session->character.race, "human") == 0) {
+    int coin = 15 + (rand() % 16);
+    session->character.gold += coin;
+    session->trait_ready_at = now + 180;
+    hg_store_save(&server->store, &session->character);
+    queue_text(session,
+               "You flash credentials nobody bothers to check. The registry "
+               "still provides for its own. (+%d gold)",
+               coin);
+    send_vitals(session);
+    return;
+  }
+  if (strcmp(session->character.race, "ghoul") == 0) {
+    session->character.hp += 25;
+    if (session->character.hp > session->character.max_hp) {
+      session->character.hp = session->character.max_hp;
+    }
+    session->trait_ready_at = now + 120;
+    queue_text(session, "Rad-scoured flesh knits itself shut. (+25 hp)");
+    send_vitals(session);
+    return;
+  }
+  if (strcmp(session->character.race, "revenant") == 0) {
+    session->character.hp += 15;
+    if (session->character.hp > session->character.max_hp) {
+      session->character.hp = session->character.max_hp;
+    }
+    session->trait_ready_at = now + 120;
+    queue_text(session,
+               "You reach into the dead Grid and draw back a little of its cold "
+               "life. (+15 hp)");
+    send_vitals(session);
+    return;
+  }
+  if (strcmp(session->character.race, "vatborn") == 0) {
+    session->character.hp += 12;
+    if (session->character.hp > session->character.max_hp) {
+      session->character.hp = session->character.max_hp;
+    }
+    session->trait_ready_at = now + 120;
+    queue_text(session,
+               "You print a field stim from raw salvage and jab it home. (+12 "
+               "hp)");
+    send_vitals(session);
+    return;
+  }
+  if (strcmp(session->character.race, "dustkin") == 0) {
+    const hg_room *room = hg_world_room(session->character.room);
+    if (room == NULL || !room->outdoors) {
+      queue_text(session,
+                 "Nothing to forage in here. You need the open wastes under the "
+                 "sky.");
+      return;
+    }
+    int coin = 5 + (rand() % 11);
+    session->character.gold += coin;
+    session->trait_ready_at = now + 90;
+    hg_store_save(&server->store, &session->character);
+    queue_text(session,
+               "You work the open pan and turn up something worth keeping. (+%d "
+               "gold)",
+               coin);
+    send_vitals(session);
+    return;
+  }
+  if (strcmp(session->character.race, "chromed") == 0) {
+    queue_text(session,
+               "You spin your augments up to a scream, but there's nothing here "
+               "to dump the charge into.");
+    return;
+  }
+  if (strcmp(session->character.race, "elf") == 0) {
+    queue_text(session,
+               "You ready to slip the net, but there is no fight here to vanish "
+               "from.");
+    return;
+  }
+  queue_text(session, "Nothing answers that call.");
+}
+
 static void handle_play(hg_session *session, hg_server *server, char *input) {
   hg_world_tick_respawns(&server->world);
   char command[160];
   snprintf(command, sizeof(command), "%s", input);
-  for (char *p = command; *p != '\0'; ++p) {
-    *p = (char)tolower((unsigned char)*p);
-  }
   char *verb = trim(command);
   char *arg = NULL;
   char *space = strchr(verb, ' ');
@@ -1200,9 +1637,15 @@ static void handle_play(hg_session *session, hg_server *server, char *input) {
     *space = '\0';
     arg = trim(space + 1);
   }
-  if (strncmp(verb, "go", 2) == 0 && arg != NULL) {
+  for (char *p = verb; *p != '\0'; ++p) {
+    *p = (char)tolower((unsigned char)*p);
+  }
+  if (strcmp(verb, "go") == 0 && arg != NULL) {
     verb = arg;
     arg = NULL;
+    for (char *p = verb; *p != '\0'; ++p) {
+      *p = (char)tolower((unsigned char)*p);
+    }
   }
 
   if (strcmp(verb, "look") == 0 || strcmp(verb, "l") == 0) {
@@ -1472,8 +1915,38 @@ static void handle_play(hg_session *session, hg_server *server, char *input) {
   if (strcmp(verb, "help") == 0) {
     queue_text(session,
                "Commands: look, exits, inventory, wield, remove, consider, "
-               "attack, rest, join, defend, listen, ping, tell, reply, yell, "
-               "emote, sense, help.");
+               "attack, rest, sleep, list, buy, sell, use, talk, ability, "
+               "title, who, join, defend, free, shelter, saved, listen, ping, "
+               "tell, reply, yell, emote, sense, help.");
+    return;
+  }
+  if (strcmp(verb, "list") == 0 || strcmp(verb, "wares") == 0) {
+    cmd_list(session);
+    return;
+  }
+  if (strcmp(verb, "buy") == 0) {
+    cmd_buy(session, server, arg);
+    return;
+  }
+  if (strcmp(verb, "use") == 0 || strcmp(verb, "drink") == 0 ||
+      strcmp(verb, "eat") == 0) {
+    cmd_use(session, server, arg);
+    return;
+  }
+  if (strcmp(verb, "talk") == 0 || strcmp(verb, "ask") == 0) {
+    cmd_talk(session, server);
+    return;
+  }
+  if (strcmp(verb, "title") == 0) {
+    cmd_title(session, server, arg != NULL ? arg : "");
+    return;
+  }
+  if (strcmp(verb, "who") == 0) {
+    cmd_who(session, server);
+    return;
+  }
+  if (strcmp(verb, "ability") == 0 || strcmp(verb, "trait") == 0) {
+    cmd_ability(session, server);
     return;
   }
   if (strcmp(verb, "tell") == 0) {
@@ -1607,16 +2080,8 @@ static void handle_play(hg_session *session, hg_server *server, char *input) {
     send_affects(session);
     return;
   }
-  if (strcmp(verb, "sell") == 0) {
-    if (strcmp(session->character.room, "market") != 0) {
-      queue_text(session, "Nobody here will buy.");
-      return;
-    }
-    if (strcmp(session->character.faction, "front") == 0) {
-      queue_text(session, "The market refuses to trade with the Cinder Front.");
-      return;
-    }
-    queue_text(session, "You have nothing the market wants right now.");
+  if (strcmp(verb, "sell") == 0 || strcmp(verb, "trade") == 0) {
+    cmd_sell_item(session, server, arg);
     return;
   }
   if (strcmp(verb, "recall") == 0 || strcmp(verb, "home") == 0) {

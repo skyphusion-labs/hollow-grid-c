@@ -33,9 +33,10 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 - [x] Market `sell`/`steal` affordances; tavern talk/buy-dust labels
 - [x] Rescue: holding pit (warden grace + antidote), cells, transit hub,
       `grid.rescued` / `grid.rescued_roll`, personal `char.dream` on sleep
-- [ ] Economy: full shop/tavern vice resolution beyond affordances
+- [x] Economy: tinker `list`/`buy`, tavern `buy dust`/`use dust`, market `sell`
+- [x] Racial abilities (Human Requisition + cooldown), `title`, `who`/`grid.who`
 - [ ] Full moral arc: forgiveness, redemption, reckoning, tide
-- [ ] Racial abilities, title/`who`
+- [ ] Wall/cache/gather, waystation treat, witness, give
 - [ ] Persistence (SQLite; JSON store remains for now)
 - [ ] Standalone smoke green (or documented residual fails)
 
@@ -61,5 +62,6 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 | Local Phase 1a (`127.0.0.1:8792`) | 71 | 79 | 2 | Combat, equipment, wastes map, join/ashsworn, listen/ping green |
 | Local Phase 1b (`127.0.0.1:8792`) | 86 | 64 | 2 | Multiplayer tell/yell/emote/look + market economy affordances |
 | Local Phase 1c (`127.0.0.1:8792`) | 95 | 58 | 1 | Rescue: holding pit grace, cells, transit hub, rescued roll, personal dream |
+| Local Phase 1d (`127.0.0.1:8792`) | 108 | 45 | 1 | Economy + identity: shop, buy dust, ability, title, who |
 
 **Parity targets:** Rust Choir (Go) and Verdigris Spool (Python) prod baselines on the same upstream suite.
