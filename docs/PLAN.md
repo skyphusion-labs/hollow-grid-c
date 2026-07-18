@@ -29,8 +29,9 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 - [x] LocalHub-style traces: `listen`, `ping`, `ping all`, `inscribe`
 - [x] Market `join`/`defend`; elf join brands ash-sworn (`valence: grave`)
 - [x] `/map.svg` stub
-- [ ] Economy: shop, tavern vices, steal/sell
-- [ ] Multiplayer: tell/reply/yell/emote, presence branding
+- [x] Multiplayer: tell/reply/yell/emote, presence in `room.info`, `player.read`
+- [x] Market `sell`/`steal` affordances; tavern talk/buy-dust labels
+- [ ] Economy: full shop/tavern vice resolution beyond affordances
 - [ ] Rescue: holding pit, cells, transit hub, `grid.rescued`
 - [ ] Full moral arc: forgiveness, redemption, reckoning, tide
 - [ ] Racial abilities, sleep/dream, title/`who`
@@ -57,5 +58,6 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 | --- | ---: | ---: | ---: | --- |
 | Local Phase 0 (`127.0.0.1:8792`) | 36 | 115 | 2 | Transport gate green; failures are Phase 1 game, LocalHub, map, and federation features |
 | Local Phase 1a (`127.0.0.1:8792`) | 71 | 79 | 2 | Combat, equipment, wastes map, join/ashsworn, listen/ping green |
+| Local Phase 1b (`127.0.0.1:8792`) | 86 | 64 | 2 | Multiplayer tell/yell/emote/look + market economy affordances |
 
 **Parity targets:** Rust Choir (Go) and Verdigris Spool (Python) prod baselines on the same upstream suite.
