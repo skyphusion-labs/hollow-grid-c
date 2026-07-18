@@ -14,6 +14,9 @@ struct hg_grid {
   int curl_global_owned;
 };
 
+/* Same order of magnitude as the character-store file cap in store.c. */
+#define HG_MAX_HUB_RESPONSE 65536
+
 struct memory_buf {
   char *data;
   size_t size;
@@ -22,6 +25,10 @@ struct memory_buf {
 static size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
   struct memory_buf *buf = userdata;
   size_t add = size * nmemb;
+  if (buf->size + add > HG_MAX_HUB_RESPONSE) {
+    /* Short write aborts the transfer with CURLE_WRITE_ERROR. */
+    return 0;
+  }
   char *next = realloc(buf->data, buf->size + add + 1);
   if (next == NULL) {
     return 0;

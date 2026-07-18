@@ -40,7 +40,7 @@ TEST_SRC := \
 OBJS := $(SRC:%=$(OBJ)/%.o)
 TEST_OBJS := $(TEST_SRC:%=$(OBJ)/%.o)
 
-.PHONY: all clean check test
+.PHONY: all clean check test smoke
 
 all: $(BIN)
 
@@ -62,6 +62,11 @@ test: $(TEST_BIN)
 
 check: $(BIN) test
 	./$(BIN) --help >/dev/null
+
+# Blocking upstream smoke.mjs (definition of done). See tests/smoke.sh.
+smoke: $(BIN)
+	chmod +x ./tests/smoke.sh
+	./tests/smoke.sh ./$(BIN)
 
 clean:
 	rm -rf $(BUILD)

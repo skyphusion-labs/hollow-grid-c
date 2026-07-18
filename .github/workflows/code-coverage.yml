@@ -19,6 +19,7 @@ jobs:
   coverage:
     name: coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -43,16 +44,43 @@ jobs:
 
       - name: Run E2E Smoke Conformance Suite
         run: |
+          set -euo pipefail
           DATA_DIR=$(mktemp -d) ./build/hollow-grid-c --addr 127.0.0.1:8792 &
           SERVER_PID=$!
 
+          cleanup() {
+            kill -SIGTERM $SERVER_PID 2>/dev/null || kill -9 $SERVER_PID 2>/dev/null || true
+            wait $SERVER_PID 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
           timeout 30s bash -c 'until curl -sf http://127.0.0.1:8792/health; do sleep 1; done'
 
-          MUD_URL=ws://127.0.0.1:8792/ws timeout 120s node upstream-mud/smoke.mjs || true
+          # 120s was truncating the 159-check suite (#17). Headroom + SMOKE_SLOW.
+          set +e
+          MUD_URL=ws://127.0.0.1:8792/ws SMOKE_SLOW=2 \
+            timeout 600s node upstream-mud/smoke.mjs > smoke.txt 2>&1
+          smoke_rc=$?
+          set -e
+
+          pass=$(grep -c '^ok' smoke.txt || true)
+          fail=$(grep -c '^FAIL' smoke.txt || true)
+          skip=$(grep -c '^SKIP' smoke.txt || true)
+          echo "smoke conformance: ${pass} ok / ${fail} fail / ${skip} skip (rc=${smoke_rc})"
+          cat smoke.txt
+
+          if [ "$smoke_rc" -eq 124 ]; then
+            echo "FAIL: smoke suite timed out before completion" >&2
+            exit 1
+          fi
+          if [ "$fail" -ne 0 ] || [ "$smoke_rc" -ne 0 ]; then
+            echo "FAIL: smoke suite reported failures" >&2
+            exit 1
+          fi
 
           # SIGTERM triggers graceful shutdown (main returns), flushing gcov data.
-          kill -SIGTERM $SERVER_PID || kill -9 $SERVER_PID
-          wait $SERVER_PID 2>/dev/null || true
+          cleanup
+          trap - EXIT
           sleep 2
 
       - name: Generate Cobertura coverage report

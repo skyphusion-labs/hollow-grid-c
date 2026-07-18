@@ -57,8 +57,9 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 
 - [x] `Dockerfile` + `compose.yaml` + `.env.example`
 - [x] GHCR release workflow (`.github/workflows/release.yml`)
-- [ ] Fleet stack + public `wss://ferrite.skyphusion.org/ws` (fleet-chezmoi)
-- [ ] mud-bots soak (optional; after transport+combat stable)
+- [x] Fleet stack + public `wss://ferrite.skyphusion.org/ws` (fleet-chezmoi)
+- [x] mud-bots soak: Slag + Scale travelling (partial unpark 2026-07-18)
+- [ ] Blocking CI smoke gate + hub harden (#14-#17; tracker #18)
 
 ## Smoke baselines
 
