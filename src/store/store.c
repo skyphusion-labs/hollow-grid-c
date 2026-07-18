@@ -118,8 +118,8 @@ int hg_character_remove_item(hg_character *character, const char *item_id) {
   for (size_t i = 0; i < character->inventory_count; ++i) {
     if (strcmp(character->inventory[i], item_id) == 0) {
       for (size_t j = i + 1; j < character->inventory_count; ++j) {
-        snprintf(character->inventory[j - 1], sizeof(character->inventory[0]),
-                 "%s", character->inventory[j]);
+        memmove(character->inventory[j - 1], character->inventory[j],
+                sizeof(character->inventory[0]));
       }
       character->inventory_count--;
       memset(character->inventory[character->inventory_count], 0,
