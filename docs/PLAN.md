@@ -38,14 +38,16 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 - [x] Full moral arc: stray/return, forgive, dais defy, reckoning, local tide/`war`
 - [x] Support surface: wall, cache/gather, give, treat, witness, listen echoes,
       local gridstats/gridprune
+- [x] LocalHub federation surface: gridcast relay, whoami, worlds, travel
 - [ ] Persistence (SQLite; JSON store remains for now)
-- [ ] Standalone smoke green (or documented residual fails)
+- [x] Standalone smoke green (153 ok / 0 fail / 1 skip; skip = second world)
 
 ## Phase 2 -- federation
 
+- [x] LocalHub federation fallback (gridcast poll, seeded worlds/Saltreach, whoami)
 - [ ] Remote Grid Hub HTTP/JSON client (`GRID_HUB_URL`)
-- [ ] Federation loop (register, presence, gridcast relay, tide cache)
-- [ ] Canonical CharSheet merge on login / commit on persist
+- [ ] Federation loop over RemoteHub (register, presence, cast relay, tide cache)
+- [ ] Canonical CharSheet merge on login / commit on persist (hub-backed)
 - [ ] Live hub smoke with a second world (`DUSTFALL_URL`)
 
 ## Phase 3 -- container + release
@@ -66,8 +68,9 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 | Local Phase 1d (`127.0.0.1:8792`) | 108 | 45 | 1 | Economy + identity: shop, buy dust, ability, title, who |
 | Local Phase 1e (`127.0.0.1:8792`) | 126 | 27 | 1 | Moral arc: stray/return, forgive, defy, reckoning, local tide |
 | Local Phase 1f (`127.0.0.1:8792`) | 146 | 7 | 1 | Support: wall, cache/gather, give, treat, witness, listen echo, ledger |
+| Local Phase 2a (`127.0.0.1:8792`) | 153 | 0 | 1 | LocalHub federation: gridcast, whoami, worlds/travel; skip = Dustfall |
 
 **Parity targets:** Rust Choir (Go) and Verdigris Spool (Python) prod baselines on the same upstream suite.
 
-Residual standalone fails after Phase 1f are federation-only (gridcast, whoami hub
-identity, worlds registry, travel). Next work is Phase 2 Remote Grid Hub.
+Standalone scoreboard matches Verdigris Spool's local baseline. Remaining Phase 2
+work is the live RemoteHub client when `GRID_HUB_URL` is set.
