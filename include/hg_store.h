@@ -23,6 +23,8 @@ typedef struct {
   int morality;
   int addiction;
   int ashsworn;
+  int strayed;
+  int redeemed;
 } hg_character;
 
 typedef struct {

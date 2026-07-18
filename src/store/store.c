@@ -186,6 +186,8 @@ int hg_store_load(const hg_store *store, const char *name, hg_character *out) {
   out->morality = json_int(root, "morality", 0);
   out->addiction = json_int(root, "addiction", 0);
   out->ashsworn = json_int(root, "ashsworn", 0);
+  out->strayed = json_int(root, "strayed", 0);
+  out->redeemed = json_int(root, "redeemed", 0);
 
   cJSON *inventory = cJSON_GetObjectItemCaseSensitive(root, "inventory");
   if (cJSON_IsArray(inventory)) {
@@ -240,6 +242,8 @@ int hg_store_save(const hg_store *store, const hg_character *character) {
   cJSON_AddNumberToObject(root, "morality", character->morality);
   cJSON_AddNumberToObject(root, "addiction", character->addiction);
   cJSON_AddBoolToObject(root, "ashsworn", character->ashsworn);
+  cJSON_AddBoolToObject(root, "strayed", character->strayed);
+  cJSON_AddBoolToObject(root, "redeemed", character->redeemed);
   cJSON *inventory = cJSON_AddArrayToObject(root, "inventory");
   for (size_t i = 0; i < character->inventory_count; ++i) {
     cJSON_AddItemToArray(inventory,

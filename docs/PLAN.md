@@ -35,7 +35,7 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
       `grid.rescued` / `grid.rescued_roll`, personal `char.dream` on sleep
 - [x] Economy: tinker `list`/`buy`, tavern `buy dust`/`use dust`, market `sell`
 - [x] Racial abilities (Human Requisition + cooldown), `title`, `who`/`grid.who`
-- [ ] Full moral arc: forgiveness, redemption, reckoning, tide
+- [x] Full moral arc: stray/return, forgive, dais defy, reckoning, local tide/`war`
 - [ ] Wall/cache/gather, waystation treat, witness, give
 - [ ] Persistence (SQLite; JSON store remains for now)
 - [ ] Standalone smoke green (or documented residual fails)
