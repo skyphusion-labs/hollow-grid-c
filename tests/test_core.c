@@ -5,6 +5,7 @@
 #include "hg_world.h"
 
 #include <assert.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -145,7 +146,11 @@ static void test_store_migration(void) {
 
   char legacy[256];
   snprintf(legacy, sizeof(legacy), "%s/oldsoul.json", chars_dir);
-  FILE *f = fopen(legacy, "wb");
+  /* Explicit 0600 like the old file store; fopen("wb") creates 0666 and
+     trips CodeQL cpp/world-writable-file-creation. */
+  int fd = open(legacy, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  assert(fd >= 0);
+  FILE *f = fdopen(fd, "wb");
   assert(f != NULL);
   fputs("{\"name\":\"OldSoul\",\"race\":\"revenant\",\"room\":\"tunnels\","
         "\"gold\":13,\"ashsworn\":true}",
