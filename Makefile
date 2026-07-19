@@ -5,7 +5,7 @@ CPPFLAGS ?= -Iinclude
 LDFLAGS ?=
 LDLIBS ?=
 
-DEPS := libwebsockets libcjson openssl libcurl
+DEPS := libwebsockets libcjson openssl libcurl sqlite3
 CFLAGS += -pthread
 LDLIBS += -pthread
 CPPFLAGS += $(shell $(PKG_CONFIG) --cflags $(DEPS))
