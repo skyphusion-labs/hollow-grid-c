@@ -601,7 +601,8 @@ static void flush_pending_loads(hg_federation_worker *worker) {
   for (size_t i = 0; i < count; ++i) {
     hg_char_load_result result;
     memset(&result, 0, sizeof(result));
-    snprintf(result.name, sizeof(result.name), "%s", loads[i].name);
+    memcpy(result.name, loads[i].name, sizeof(result.name));
+    result.name[sizeof(result.name) - 1] = '\0';
     result.resumed = loads[i].resumed;
     if (hg_grid_load_character(worker->grid, loads[i].name, &result.sheet,
                                &result.found) == 0) {
