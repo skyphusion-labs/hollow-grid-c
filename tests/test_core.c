@@ -56,7 +56,10 @@ static void test_event(void) {
 static void rm_rf(const char *path) {
   char cmd[256];
   snprintf(cmd, sizeof(cmd), "rm -rf '%s'", path);
-  (void)system(cmd);
+  /* Assign then discard: a bare (void)system(...) still trips GCC's
+     warn_unused_result. Cleanup failure is non-fatal for a temp dir. */
+  int rc = system(cmd);
+  (void)rc;
 }
 
 static void test_store(void) {
@@ -137,7 +140,8 @@ static void test_store_migration(void) {
   snprintf(chars_dir, sizeof(chars_dir), "%s/characters", root);
   char cmd[256];
   snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", chars_dir);
-  assert(system(cmd) == 0);
+  int mk = system(cmd);
+  assert(mk == 0);
 
   char legacy[256];
   snprintf(legacy, sizeof(legacy), "%s/oldsoul.json", chars_dir);
