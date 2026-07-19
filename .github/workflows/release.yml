@@ -34,7 +34,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install C dependencies
-        run: sudo apt-get update && sudo apt-get install -y libcjson-dev libwebsockets-dev libcurl4-openssl-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libcjson-dev libwebsockets-dev libcurl4-openssl-dev libsqlite3-dev pkg-config
 
       - name: Setup Node.js (for smoke.mjs)
         uses: actions/setup-node@v4

@@ -5,6 +5,7 @@
 #include "hg_world.h"
 
 #include <assert.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,9 +54,19 @@ static void test_event(void) {
   free(line);
 }
 
+static void rm_rf(const char *path) {
+  char cmd[256];
+  snprintf(cmd, sizeof(cmd), "rm -rf '%s'", path);
+  /* Assign then discard: a bare (void)system(...) still trips GCC's
+     warn_unused_result. Cleanup failure is non-fatal for a temp dir. */
+  int rc = system(cmd);
+  (void)rc;
+}
+
 static void test_store(void) {
   char root[128];
   snprintf(root, sizeof(root), "/tmp/hollow-grid-c-unit-%ld", (long)getpid());
+  rm_rf(root);
 
   hg_store store;
   assert(hg_store_init(&store, root) == 0);
@@ -91,14 +102,72 @@ static void test_store(void) {
   assert(loaded.inventory_count == 2);
   assert(hg_character_has_item(&loaded, "antidote") == 1);
 
-  /* A name with no record on disk loads as "not found" (0), not an error. */
+  /* A name with no record loads as "not found" (0), not an error. */
   assert(hg_store_load(&store, "no_such_soul", &loaded) == 0);
 
-  char record[640];
-  snprintf(record, sizeof(record), "%s/ferrite_17.json", store.root);
-  assert(remove(record) == 0);
-  assert(rmdir(store.root) == 0);
-  assert(rmdir(root) == 0);
+  /* Lookups are case-insensitive on the stored key. */
+  assert(hg_store_load(&store, "FERRITE_17", &loaded) == 1);
+  assert(strcmp(loaded.race, "elf") == 0);
+
+  /* Re-save overwrites in place (UPSERT), no duplicate row. */
+  loaded.gold = 99;
+  assert(hg_store_save(&store, &loaded) == 0);
+  hg_character again;
+  assert(hg_store_load(&store, "ferrite_17", &again) == 1);
+  assert(again.gold == 99);
+
+  hg_store_close(&store);
+
+  /* A fresh open of the same directory sees the persisted record: SQLite
+     durability across process restarts. */
+  hg_store reopened;
+  assert(hg_store_init(&reopened, root) == 0);
+  assert(hg_store_load(&reopened, "ferrite_17", &loaded) == 1);
+  assert(loaded.gold == 99);
+  hg_store_close(&reopened);
+
+  rm_rf(root);
+}
+
+/* A legacy per-character .json file left by the old file store is imported on
+   first init, so live players keep their progress after the SQLite cutover. */
+static void test_store_migration(void) {
+  char root[128];
+  snprintf(root, sizeof(root), "/tmp/hollow-grid-c-migrate-%ld",
+           (long)getpid());
+  rm_rf(root);
+
+  char chars_dir[192];
+  snprintf(chars_dir, sizeof(chars_dir), "%s/characters", root);
+  char cmd[256];
+  snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", chars_dir);
+  int mk = system(cmd);
+  assert(mk == 0);
+
+  char legacy[256];
+  snprintf(legacy, sizeof(legacy), "%s/oldsoul.json", chars_dir);
+  /* Explicit 0600 like the old file store; fopen("wb") creates 0666 and
+     trips CodeQL cpp/world-writable-file-creation. */
+  int fd = open(legacy, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+  assert(fd >= 0);
+  FILE *f = fdopen(fd, "wb");
+  assert(f != NULL);
+  fputs("{\"name\":\"OldSoul\",\"race\":\"revenant\",\"room\":\"tunnels\","
+        "\"gold\":13,\"ashsworn\":true}",
+        f);
+  fclose(f);
+
+  hg_store store;
+  assert(hg_store_init(&store, root) == 0);
+  hg_character loaded;
+  assert(hg_store_load(&store, "oldsoul", &loaded) == 1);
+  assert(strcmp(loaded.race, "revenant") == 0);
+  assert(strcmp(loaded.room, "tunnels") == 0);
+  assert(loaded.gold == 13);
+  assert(loaded.ashsworn == 1);
+  hg_store_close(&store);
+
+  rm_rf(root);
 }
 
 static void test_store_names(void) {
@@ -175,6 +244,7 @@ int main(void) {
   test_items();
   test_event();
   test_store();
+  test_store_migration();
   test_store_names();
   test_character_items();
   test_grid_offline();
