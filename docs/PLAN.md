@@ -49,6 +49,9 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 - [x] Federation loop over RemoteHub (register, presence, cast relay, tide cache)
 - [x] Background federation worker (periodic RPC + identity commits stay off the
       WebSocket event loop)
+- [x] Command-path hub RPC also off the loop: cached worlds/presence/tide/ledger/
+      hub health; queued fallen/gridcast/tide-shift/prune; async CharSheet load
+      on login (#14, #15)
 - [x] Canonical CharSheet merge on login / commit on disconnect+travel
 - [x] Live hub smoke with Dustfall; two consecutive stateful runs on one process
       pass all 159 checks
@@ -59,7 +62,8 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 - [x] GHCR release workflow (`.github/workflows/release.yml`)
 - [x] Fleet stack + public `wss://ferrite.skyphusion.org/ws` (fleet-chezmoi)
 - [x] mud-bots soak: Slag + Scale travelling (partial unpark 2026-07-18)
-- [ ] Blocking CI smoke gate + hub harden (#14-#17; tracker #18)
+- [x] Blocking CI smoke gate + hub response cap (#16, #17 via #19)
+- [ ] Remaining Phase 3 tracker items (#18): SQLite persistence deferred
 
 ## Smoke baselines
 
