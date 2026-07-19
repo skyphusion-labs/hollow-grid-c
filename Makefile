@@ -33,6 +33,7 @@ SRC := \
 TEST_SRC := \
 	tests/test_core.c \
 	src/event/event.c \
+	src/grid/remote.c \
 	src/store/store.c \
 	src/world/items.c \
 	src/world/world.c

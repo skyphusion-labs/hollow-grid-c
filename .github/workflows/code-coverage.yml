@@ -19,7 +19,7 @@ jobs:
   coverage:
     name: coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -56,10 +56,11 @@ jobs:
 
           timeout 30s bash -c 'until curl -sf http://127.0.0.1:8792/health; do sleep 1; done'
 
-          # 120s was truncating the 159-check suite (#17). Headroom + SMOKE_SLOW.
+          # Instrumented (-O0 --coverage) runs slower than release; give the full
+          # 159-check suite generous headroom (#17, #18). SMOKE_SLOW spaces sends.
           set +e
           MUD_URL=ws://127.0.0.1:8792/ws SMOKE_SLOW=2 \
-            timeout 600s node upstream-mud/smoke.mjs > smoke.txt 2>&1
+            timeout 900s node upstream-mud/smoke.mjs > smoke.txt 2>&1
           smoke_rc=$?
           set -e
 
@@ -85,8 +86,12 @@ jobs:
 
       - name: Generate Cobertura coverage report
         run: |
+          # Ratchet floor: fail the job if line coverage regresses below the
+          # agreed baseline (main was 58.6% post-#20; unit seams lift remote.c).
+          # Raise this number as coverage climbs; never lower it silently.
           gcovr --root . --filter 'src/' \
             --exclude 'tests/' \
+            --fail-under-line 55 \
             --cobertura coverage.xml \
             --print-summary
 
