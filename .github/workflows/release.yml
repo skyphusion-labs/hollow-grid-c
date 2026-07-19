@@ -29,7 +29,7 @@ jobs:
   build_docker:
     name: Test, build, and push
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
 
@@ -64,7 +64,7 @@ jobs:
           # Full 159-check suite under CI load; 180s was truncating (#17).
           set +e
           MUD_URL=ws://localhost:18792/ws SMOKE_SLOW=2 \
-            timeout 600 node "$SMOKE" > smoke.txt 2>&1
+            timeout 900 node "$SMOKE" > smoke.txt 2>&1
           smoke_rc=$?
           set -e
           docker rm -f hgc-ci >/dev/null 2>&1 || true

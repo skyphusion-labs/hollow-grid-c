@@ -63,7 +63,9 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 - [x] Fleet stack + public `wss://ferrite.skyphusion.org/ws` (fleet-chezmoi)
 - [x] mud-bots soak: Slag + Scale travelling (partial unpark 2026-07-18)
 - [x] Blocking CI smoke gate + hub response cap (#16, #17 via #19)
-- [ ] Remaining Phase 3 tracker items (#18): SQLite persistence deferred
+- [x] Coverage ratchet: unit seams for store/grid clients, `gcovr --fail-under-line`
+      floor, and instrumented-smoke headroom (900s / 30-min job)
+- [ ] Remaining Phase 3 tracker items (#18): SQLite persistence
 
 ## Smoke baselines
 

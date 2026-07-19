@@ -47,6 +47,16 @@ static int json_int(cJSON *root, const char *key, int fallback) {
   return cJSON_IsNumber(item) ? item->valueint : fallback;
 }
 
+/* Flags are written with cJSON bools; accept either bool or a 0/1 number so
+   records survive a round-trip and tolerate hand-edited data. */
+static int json_flag(cJSON *root, const char *key) {
+  cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+  if (cJSON_IsBool(item)) {
+    return cJSON_IsTrue(item) ? 1 : 0;
+  }
+  return cJSON_IsNumber(item) && item->valueint != 0 ? 1 : 0;
+}
+
 int hg_store_init(hg_store *store, const char *data_dir) {
   if (store == NULL || data_dir == NULL || data_dir[0] == '\0') {
     return -1;
@@ -185,9 +195,9 @@ int hg_store_load(const hg_store *store, const char *name, hg_character *out) {
   out->gold = json_int(root, "gold", 0);
   out->morality = json_int(root, "morality", 0);
   out->addiction = json_int(root, "addiction", 0);
-  out->ashsworn = json_int(root, "ashsworn", 0);
-  out->strayed = json_int(root, "strayed", 0);
-  out->redeemed = json_int(root, "redeemed", 0);
+  out->ashsworn = json_flag(root, "ashsworn");
+  out->strayed = json_flag(root, "strayed");
+  out->redeemed = json_flag(root, "redeemed");
 
   cJSON *inventory = cJSON_GetObjectItemCaseSensitive(root, "inventory");
   if (cJSON_IsArray(inventory)) {

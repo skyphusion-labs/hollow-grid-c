@@ -1,4 +1,5 @@
 #include "hg_event.h"
+#include "hg_grid.h"
 #include "hg_items.h"
 #include "hg_store.h"
 #include "hg_world.h"
@@ -67,6 +68,13 @@ static void test_store(void) {
   snprintf(saved.room, sizeof(saved.room), "coil-yard");
   snprintf(saved.weapon, sizeof(saved.weapon), "shiv");
   saved.morality = 3;
+  saved.xp = 42;
+  saved.gold = 7;
+  saved.ashsworn = 1;
+  saved.strayed = 1;
+  saved.redeemed = 1;
+  snprintf(saved.title, sizeof(saved.title), "the Unbowed");
+  assert(hg_character_add_item(&saved, "antidote") == 0);
   assert(hg_store_save(&store, &saved) == 0);
 
   hg_character loaded;
@@ -74,7 +82,17 @@ static void test_store(void) {
   assert(strcmp(loaded.race, "elf") == 0);
   assert(strcmp(loaded.room, "coil-yard") == 0);
   assert(strcmp(loaded.weapon, "shiv") == 0);
-  assert(loaded.inventory_count == 1);
+  assert(strcmp(loaded.title, "the Unbowed") == 0);
+  assert(loaded.xp == 42);
+  assert(loaded.gold == 7);
+  assert(loaded.ashsworn == 1);
+  assert(loaded.strayed == 1);
+  assert(loaded.redeemed == 1);
+  assert(loaded.inventory_count == 2);
+  assert(hg_character_has_item(&loaded, "antidote") == 1);
+
+  /* A name with no record on disk loads as "not found" (0), not an error. */
+  assert(hg_store_load(&store, "no_such_soul", &loaded) == 0);
 
   char record[640];
   snprintf(record, sizeof(record), "%s/ferrite_17.json", store.root);
@@ -83,11 +101,83 @@ static void test_store(void) {
   assert(rmdir(root) == 0);
 }
 
+static void test_store_names(void) {
+  assert(hg_store_valid_name("ok") == 1);
+  assert(hg_store_valid_name("Ferrite_17-b") == 1);
+  assert(hg_store_valid_name(NULL) == 0);
+  assert(hg_store_valid_name("x") == 0);
+  assert(hg_store_valid_name("has space") == 0);
+  assert(hg_store_valid_name("slash/name") == 0);
+
+  char too_long[64];
+  memset(too_long, 'a', sizeof(too_long));
+  too_long[sizeof(too_long) - 1] = '\0';
+  assert(hg_store_valid_name(too_long) == 0);
+
+  /* hg_store_init rejects empty/NULL data dirs. */
+  hg_store store;
+  assert(hg_store_init(&store, NULL) == -1);
+  assert(hg_store_init(&store, "") == -1);
+  assert(hg_store_init(NULL, "/tmp") == -1);
+}
+
+static void test_character_items(void) {
+  hg_character c;
+  hg_character_new(&c, "Rivet");
+  assert(c.inventory_count == 1);
+
+  /* Fill inventory to the cap, then confirm the overflow is refused. */
+  const char *ids[] = {"a", "b", "c", "d", "e", "f", "g", "h", "i"};
+  int added = 0;
+  for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); ++i) {
+    if (hg_character_add_item(&c, ids[i]) == 0) {
+      added++;
+    }
+  }
+  assert(c.inventory_count == HG_MAX_INVENTORY);
+  assert(added < (int)(sizeof(ids) / sizeof(ids[0])));
+
+  assert(hg_character_remove_item(&c, "shiv") == 0);
+  assert(hg_character_has_item(&c, "shiv") == 0);
+  assert(hg_character_remove_item(&c, "not-here") == -1);
+
+  assert(hg_character_add_item(NULL, "x") == -1);
+  assert(hg_character_has_item(NULL, "x") == 0);
+  assert(hg_character_remove_item(NULL, "x") == -1);
+}
+
+static void test_grid_offline(void) {
+  /* No hub URL means LocalHub: hg_grid_open returns NULL, callers stay local. */
+  assert(hg_grid_open(NULL, NULL) == NULL);
+  assert(hg_grid_open("", "tok") == NULL);
+  hg_grid_close(NULL);
+
+  /* A grid pointed at a closed port exercises the RPC transport-failure path
+     without a live hub. Connection refused returns fast (no 2s timeout). */
+  hg_grid *grid = hg_grid_open("http://127.0.0.1:1/rpc", "");
+  assert(grid != NULL);
+  int tide = 0;
+  assert(hg_grid_tide(grid, &tide) == -1);
+  long latency = -1;
+  assert(hg_grid_ping(grid, &latency) == -1);
+  assert(latency >= 0);
+  assert(hg_grid_register(grid, "Ferrite Wastes", "ws://x/ws") == -1);
+  assert(hg_grid_gridcast(grid, "Ferrite Wastes", "Rivet", "hi") == -1);
+  hg_grid_world worlds[4];
+  size_t world_count = 99;
+  assert(hg_grid_list_worlds(grid, worlds, 4, &world_count) == -1);
+  assert(world_count == 0);
+  hg_grid_close(grid);
+}
+
 int main(void) {
   test_world();
   test_items();
   test_event();
   test_store();
+  test_store_names();
+  test_character_items();
+  test_grid_offline();
   puts("core tests passed");
   return 0;
 }
