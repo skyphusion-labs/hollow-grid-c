@@ -4,14 +4,15 @@ name: release
 #   - make check on every push/PR
 #   - docker build on every push/PR
 #   - blocking upstream smoke.mjs (definition of done; see #17)
-#   - push to GHCR (:<sha> + :latest) on push to main only
+#   - push to GHCR (:<sha> + :latest) on a pushed version tag (v*) only
 #
-# After a green GHCR push on main, dispatches fleet-chezmoi ferrite-wastes-roll when the
+# After a green GHCR push on a version tag, dispatches fleet-chezmoi ferrite-wastes-roll when the
 # fleet stack is live (org secret FLEET_DISPATCH_TOKEN).
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 
 permissions:
@@ -90,19 +91,19 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Log in to GHCR (main only)
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      - name: Log in to GHCR (tag only)
+        if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: Push to GHCR (main only)
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      - name: Push to GHCR (tag only)
+        if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
         run: |
           docker push "$IMAGE:${GITHUB_SHA}"
           docker push "$IMAGE:latest"
           echo "Pushed hollow-grid-c:${GITHUB_SHA}."
 
-      - name: Dispatch ferrite-wastes roll to fleet-chezmoi (main only)
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      - name: Dispatch ferrite-wastes roll to fleet-chezmoi (tag only)
+        if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
         env:
           FLEET_DISPATCH_TOKEN: ${{ secrets.FLEET_DISPATCH_TOKEN }}
         run: bash .github/scripts/dispatch-fleet-ferrite-roll.sh
