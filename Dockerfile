@@ -10,6 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config \
       libcjson-dev libwebsockets-dev libcurl4-openssl-dev libssl-dev \
+      libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Makefile ./
@@ -23,7 +24,7 @@ FROM ubuntu:24.04 AS run
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
-      libcjson1 libwebsockets19t64 libcurl4t64 libssl3t64 \
+      libcjson1 libwebsockets19t64 libcurl4t64 libssl3t64 libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/build/hollow-grid-c /usr/local/bin/hollow-grid-c
 VOLUME ["/data"]

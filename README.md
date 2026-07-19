@@ -33,10 +33,10 @@ Sibling ports (same contract, different runtimes):
 
 ```sh
 # macOS
-brew install libwebsockets cjson curl pkgconf
+brew install libwebsockets cjson curl sqlite pkgconf
 
 # Debian / Ubuntu
-# sudo apt-get install libcjson-dev libwebsockets-dev libcurl4-openssl-dev pkg-config
+# sudo apt-get install libcjson-dev libwebsockets-dev libcurl4-openssl-dev libsqlite3-dev pkg-config
 
 make
 ./build/hollow-grid-c --addr 127.0.0.1:8792
@@ -67,9 +67,13 @@ merge to `main`). Fleet host: `wss://ferrite.skyphusion.org/ws`.
 - libwebsockets (HTTP and WebSocket transport)
 - cJSON (`@event` payloads and the character store)
 - libcurl (RemoteHub Grid Hub HTTP JSON-RPC)
+- SQLite3 (character persistence)
 - pkg-config (build flag discovery)
 
-Characters persist as JSON under `DATA_DIR/characters` until SQLite lands.
+Characters persist in a single SQLite database at `DATA_DIR/characters.db`
+(each record is the same JSON document keyed by lowercased name). Legacy
+per-character files under `DATA_DIR/characters/*.json` are imported once on
+first launch, so an existing deploy keeps its progress across the cutover.
 
 ## Docs
 

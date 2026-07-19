@@ -39,7 +39,8 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 - [x] Support surface: wall, cache/gather, give, treat, witness, listen echoes,
       local gridstats/gridprune
 - [x] LocalHub federation surface: gridcast relay, whoami, worlds, travel
-- [ ] Persistence (SQLite; JSON store remains for now)
+- [x] Persistence: SQLite character store (`DATA_DIR/characters.db`), one-time
+      import of legacy per-character JSON files
 - [x] Standalone smoke green (153 ok / 0 fail / 1 skip; skip = second world)
 
 ## Phase 2 -- federation
@@ -65,7 +66,7 @@ Sibling references: `hollow-grid-go/docs/PLAN.md`, `hollow-grid-py/docs/PLAN.md`
 - [x] Blocking CI smoke gate + hub response cap (#16, #17 via #19)
 - [x] Coverage ratchet: unit seams for store/grid clients, `gcovr --fail-under-line`
       floor, and instrumented-smoke headroom (900s / 30-min job)
-- [ ] Remaining Phase 3 tracker items (#18): SQLite persistence
+- [x] SQLite persistence (Phase 1 carryover; #18)
 
 ## Smoke baselines
 

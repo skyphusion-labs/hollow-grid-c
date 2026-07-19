@@ -27,11 +27,17 @@ typedef struct {
   int redeemed;
 } hg_character;
 
+/* Opaque SQLite handle; callers embed hg_store by value and treat db as
+   private. All access is single-threaded (the WebSocket event loop). */
+struct sqlite3;
+
 typedef struct {
-  char root[512];
+  struct sqlite3 *db;
+  char path[512];
 } hg_store;
 
 int hg_store_init(hg_store *store, const char *data_dir);
+void hg_store_close(hg_store *store);
 int hg_store_load(const hg_store *store, const char *name, hg_character *out);
 int hg_store_save(const hg_store *store, const hg_character *character);
 int hg_store_valid_name(const char *name);

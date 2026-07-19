@@ -4903,6 +4903,7 @@ int hg_server_run(const hg_server_config *config) {
   if (server.context == NULL) {
     fprintf(stderr, "cannot create WebSocket server context\n");
     hg_grid_close(server.remote);
+    hg_store_close(&server.store);
     return 1;
   }
   if (server.remote != NULL && federation_worker_start(&server) != 0) {
@@ -4922,5 +4923,6 @@ int hg_server_run(const hg_server_config *config) {
   lws_context_destroy(server.context);
   federation_worker_stop(&server);
   hg_grid_close(server.remote);
+  hg_store_close(&server.store);
   return 0;
 }

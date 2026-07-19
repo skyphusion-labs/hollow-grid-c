@@ -27,7 +27,7 @@ jobs:
       - name: Install C toolchain and dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libcjson-dev libwebsockets-dev libcurl4-openssl-dev pkg-config gcovr
+          sudo apt-get install -y build-essential libcjson-dev libwebsockets-dev libcurl4-openssl-dev libsqlite3-dev pkg-config gcovr
 
       - name: Setup Node.js (for Smoke Engine)
         uses: actions/setup-node@v4
