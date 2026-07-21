@@ -1,5 +1,7 @@
 name: release
 
+# guard-audit: skip -- SOLO boundary, not org tag-deploy lane
+#
 # Image build + GHCR push for hollow-grid-c (Ferrite Wastes).
 #   - make check on every push/PR
 #   - docker build on every push/PR
