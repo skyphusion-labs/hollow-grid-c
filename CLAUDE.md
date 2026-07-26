@@ -14,8 +14,9 @@ This is a **complementary fleet world node**, not a Workers/DO port. It speaks t
 same language-agnostic wire protocol and joins the Grid Hub when `GRID_HUB_URL` is set.
 
 **Status:** Live on the Grid. Definition of done is upstream `smoke.mjs`
-(**159 executable checks** on the 2026-07-17 revision); two consecutive
-stateful RemoteHub runs pass. See `docs/PLAN.md`.
+(**152 executed + 1 federation skip** at the-hollow-grid `35dfee2`; the suite
+tracks upstream, so score it against upstream head); two consecutive stateful
+RemoteHub runs pass. See `docs/PLAN.md`.
 
 ## The Grid federation
 
@@ -45,7 +46,8 @@ When `/ws` exists: run the binary, then score with upstream smoke from a
 the-hollow-grid checkout:
 
 ```bash
-MUD_URL=ws://127.0.0.1:8792/ws node /path/to/the-hollow-grid/smoke.mjs
+ADMIN_TOKEN=$(openssl rand -hex 16) \
+  MUD_URL=ws://127.0.0.1:8792/ws node /path/to/the-hollow-grid/smoke.mjs
 ```
 
 ## Working method
