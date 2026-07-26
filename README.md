@@ -21,10 +21,11 @@ Sibling ports (same contract, different runtimes):
 > data, not buried in prose.
 
 - **Upstream contract:** [`the-hollow-grid/docs/protocol.md`](https://github.com/skyphusion-labs/the-hollow-grid/blob/main/docs/protocol.md)
-- **Definition of done:** upstream `smoke.mjs` (**159 executable
-  checks** on the 2026-07-17 revision)
+- **Definition of done:** the full upstream `smoke.mjs` (**152 executed + 1
+  federation skip** at the-hollow-grid `35dfee2`; the suite tracks upstream, so
+  score it against upstream head rather than a frozen count)
 - **Status:** Live on the Grid with a non-blocking federation worker; two
-  consecutive stateful RemoteHub runs pass all 159 checks. Fleet host:
+  consecutive stateful RemoteHub runs pass the whole suite. Fleet host:
   `ferrite.skyphusion.org`.
   See `docs/PLAN.md`.
 - **License:** AGPL-3.0-only (same as the other ports). See `LICENSE` + `NOTICE`.
