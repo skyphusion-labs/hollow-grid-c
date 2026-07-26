@@ -64,7 +64,14 @@ jobs:
           docker run -d --name hgc-ci -p 18792:8792 "$IMAGE:latest"
           for i in $(seq 1 30); do curl -sf localhost:18792/health >/dev/null 2>&1 && break; sleep 1; done
           curl -sf localhost:18792/health >/dev/null
-          # Full 159-check suite under CI load; 180s was truncating (#17).
+          # The upstream harness refuses to start without ADMIN_TOKEN: the-hollow-grid
+          # e30d2db (K3 wave 21, #984) dropped the hardcoded smoke fallback and made the
+          # var a hard throw at module load, which is what reported 0 ok / 0 fail / 0 skip
+          # here (#31). Ferrite Wastes gates keepers by ADMINS name and never prompts for
+          # a token, so an ephemeral per-run value satisfies that contract honestly.
+          ADMIN_TOKEN="$(openssl rand -hex 16)"
+          export ADMIN_TOKEN
+          # Full upstream suite under CI load; 180s was truncating (#17).
           set +e
           MUD_URL=ws://localhost:18792/ws SMOKE_SLOW=2 \
             timeout 900 node "$SMOKE" > smoke.txt 2>&1
@@ -75,6 +82,11 @@ jobs:
           fail=$(grep -c '^FAIL' smoke.txt || true)
           skip=$(grep -c '^SKIP' smoke.txt || true)
           echo "smoke conformance: ${pass} ok / ${fail} fail / ${skip} skip (rc=${smoke_rc})"
+          if [ "$pass" -eq 0 ]; then
+            echo "FAIL: smoke suite ran zero checks (harness aborted before the check loop)" >&2
+            tail -20 smoke.txt >&2
+            exit 1
+          fi
           if [ "$smoke_rc" -eq 124 ]; then
             echo "FAIL: smoke suite timed out before completion" >&2
             exit 1

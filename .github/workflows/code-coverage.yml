@@ -55,9 +55,16 @@ jobs:
           trap cleanup EXIT
 
           timeout 30s bash -c 'until curl -sf http://127.0.0.1:8792/health; do sleep 1; done'
+          # The upstream harness refuses to start without ADMIN_TOKEN: the-hollow-grid
+          # e30d2db (K3 wave 21, #984) dropped the hardcoded smoke fallback and made the
+          # var a hard throw at module load, which is what reported 0 ok / 0 fail / 0 skip
+          # here (#31). Ferrite Wastes gates keepers by ADMINS name and never prompts for
+          # a token, so an ephemeral per-run value satisfies that contract honestly.
+          ADMIN_TOKEN="$(openssl rand -hex 16)"
+          export ADMIN_TOKEN
 
           # Instrumented (-O0 --coverage) runs slower than release; give the full
-          # 159-check suite generous headroom (#17, #18). SMOKE_SLOW spaces sends.
+          # upstream suite generous headroom (#17, #18). SMOKE_SLOW spaces sends.
           set +e
           MUD_URL=ws://127.0.0.1:8792/ws SMOKE_SLOW=2 \
             timeout 900s node upstream-mud/smoke.mjs > smoke.txt 2>&1
@@ -69,6 +76,10 @@ jobs:
           skip=$(grep -c '^SKIP' smoke.txt || true)
           echo "smoke conformance: ${pass} ok / ${fail} fail / ${skip} skip (rc=${smoke_rc})"
           cat smoke.txt
+          if [ "$pass" -eq 0 ]; then
+            echo "FAIL: smoke suite ran zero checks (harness aborted before the check loop); see smoke.txt" >&2
+            exit 1
+          fi
 
           if [ "$smoke_rc" -eq 124 ]; then
             echo "FAIL: smoke suite timed out before completion" >&2
