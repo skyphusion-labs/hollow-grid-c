@@ -43,7 +43,8 @@ make
 wscat -c ws://127.0.0.1:8792/ws
 
 # From a sibling the-hollow-grid checkout:
-MUD_URL=ws://127.0.0.1:8792/ws node /path/to/the-hollow-grid/smoke.mjs
+ADMIN_TOKEN=$(openssl rand -hex 16) \
+  MUD_URL=ws://127.0.0.1:8792/ws node /path/to/the-hollow-grid/smoke.mjs
 ```
 
 `make check` builds with strict warnings and runs the core world, event, and

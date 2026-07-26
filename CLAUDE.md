@@ -45,7 +45,8 @@ When `/ws` exists: run the binary, then score with upstream smoke from a
 the-hollow-grid checkout:
 
 ```bash
-MUD_URL=ws://127.0.0.1:8792/ws node /path/to/the-hollow-grid/smoke.mjs
+ADMIN_TOKEN=$(openssl rand -hex 16) \
+  MUD_URL=ws://127.0.0.1:8792/ws node /path/to/the-hollow-grid/smoke.mjs
 ```
 
 ## Working method

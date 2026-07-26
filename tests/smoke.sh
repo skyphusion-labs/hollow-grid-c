@@ -1,6 +1,6 @@
 #!/bin/sh
 # Blocking upstream smoke.mjs conformance against a local Ferrite Wastes.
-# Requires: node >= 18, curl, and a checkout of the-hollow-grid (or SMOKE_MJS).
+# Requires: node >= 18, curl, openssl, and a checkout of the-hollow-grid (or SMOKE_MJS).
 set -eu
 
 binary=${1:-./build/hollow-grid-c}
@@ -56,6 +56,12 @@ export MUD_URL="ws://127.0.0.1:${port}/ws"
 # Unreachable second world: Phase 12 must SKIP, not FAIL.
 export DUSTFALL_URL="${DUSTFALL_URL:-ws://127.0.0.1:18788/ws}"
 export SMOKE_SLOW="${SMOKE_SLOW:-2}"
+# smoke.mjs hard-requires ADMIN_TOKEN: upstream keeper login is token-gated, and the
+# harness throws at module load when the var is unset since the-hollow-grid e30d2db
+# (0 ok / 0 fail / 0 skip, #31). Ferrite Wastes gates keepers by ADMINS name and
+# never prompts for a token, so an ephemeral per-run value satisfies the contract.
+ADMIN_TOKEN="${ADMIN_TOKEN:-$(openssl rand -hex 16)}"
+export ADMIN_TOKEN
 
 echo "smoke: binary=$binary port=$port suite=$smoke_mjs timeout=${smoke_timeout}s SMOKE_SLOW=$SMOKE_SLOW"
 timeout "$smoke_timeout" node "$smoke_mjs"
