@@ -5,7 +5,7 @@
 # with the shared libraries it needs (libwebsockets, cJSON, libcurl, OpenSSL).
 
 # --- build ---
-FROM ubuntu:24.04 AS build
+FROM ubuntu:26.04 AS build
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config \
@@ -20,7 +20,7 @@ COPY tests tests
 RUN make -j"$(nproc)"
 
 # --- run ---
-FROM ubuntu:24.04 AS run
+FROM ubuntu:26.04 AS run
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
