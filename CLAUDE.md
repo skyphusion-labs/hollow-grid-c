@@ -71,11 +71,11 @@ ADMIN_TOKEN=$(openssl rand -hex 16) \
 - **AGPL-3.0-only**; keep NOTICE honest.
 - Branch + PR workflow; do not push straight to `main` unless Conrad explicitly says so.
 
-## Repo layout (initial)
+## Repo layout (current)
 
 ```
-src/main.c           entry + CLI stub
-include/             public headers (grow as systems land)
+src/main.c           entry + full world server
+include/             public headers (landed (transport, world, grid, store))
 docs/PLAN.md         phase plan
 docs/WORLD.md        world identity
 Makefile             build
