@@ -1,22 +1,32 @@
 # CLAUDE.md
 
-Guidance for Claude Code / Cursor agents working in this repo.
+> ## HANDS-OFF -- Conrad's solo fun
+>
+> **No agent work in this repo without explicit task language from Conrad in the same
+> turn.** Prior foreign-agent damage on the Basalt (asm) lane is why this rule is hard.
+> Stop means stop. If you are not under an explicit task for this repo right now, leave.
+> Protocol authority remains `the-hollow-grid/docs/protocol.md`.
+
+Guidance for Claude Code / agents working in this repo (only when explicitly tasked).
 
 ## What this is
 
-**A Hollow Grid world server, in C.** Sibling of [hollow-grid-go](https://github.com/skyphusion-labs/hollow-grid-go)
-(Rust Choir) and [hollow-grid-py](https://github.com/skyphusion-labs/hollow-grid-py)
-(Verdigris Spool). Reference implementation:
+**Ferrite Wastes: a Hollow Grid world server, in C.** Sibling of
+[hollow-grid-go](https://github.com/skyphusion-labs/hollow-grid-go) (Rust Choir) and
+[hollow-grid-py](https://github.com/skyphusion-labs/hollow-grid-py) (Verdigris Spool).
+Reference implementation:
 [the-hollow-grid](https://github.com/skyphusion-labs/the-hollow-grid) (TypeScript on
 Cloudflare Workers + Durable Objects).
 
 This is a **complementary fleet world node**, not a Workers/DO port. It speaks the
 same language-agnostic wire protocol and joins the Grid Hub when `GRID_HUB_URL` is set.
 
-**Status:** Live on the Grid. Definition of done is upstream `smoke.mjs`
-(**152 executed + 1 federation skip** at the-hollow-grid `35dfee2`; the suite
-tracks upstream, so score it against upstream head); two consecutive stateful
-RemoteHub runs pass. See `docs/PLAN.md`.
+**Protocol authority:** `the-hollow-grid/docs/protocol.md`. **Definition of done =
+upstream `smoke.mjs`** (score against current the-hollow-grid head); two consecutive
+stateful RemoteHub runs pass.
+
+**Status:** **Ferrite live** on the Grid when healthy. See `docs/PLAN.md` and
+`docs/WORLD.md`.
 
 ## The Grid federation
 
