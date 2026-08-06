@@ -85,3 +85,9 @@ Makefile             build
 
 Conventional Commits; SemVer-style `0.MINOR.PATCH` while pre-1.0. Author on this
 laptop: Conrad Rockenhaus `<conrad@skyphusion.org>`.
+
+## Release / deploy
+
+**Tag-gated production deploy.** Merges to `main` run CI only; they do not ship production.
+Cut an annotated SemVer tag on `main` to release (`git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z`).
+Deploy workflows assert the tag commit is an ancestor of `origin/main`.
