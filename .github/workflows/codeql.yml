@@ -18,13 +18,38 @@ concurrency:
 
 jobs:
   analyze:
-    name: Analyze
+    name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          # fc#1652: this repo is 235KB of C (src/, include/) and had NO c-cpp leg at
+          # all, so none of it was analysed and nothing was red about that. c-cpp has
+          # no build-mode: none path, so the leg carries a real build; the deps and
+          # `make` below are the same ones ci.yml already runs green on ubuntu-latest,
+          # and the same shape hollow-grid-asm has been analysing c-cpp with since
+          # 2026-08-05.
+          - language: c-cpp
+            build-mode: manual
     steps:
       - uses: actions/checkout@v7
+      - name: Install build dependencies
+        if: matrix.language == 'c-cpp'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcjson-dev libwebsockets-dev \
+            libcurl4-openssl-dev libsqlite3-dev pkg-config
       - uses: github/codeql-action/init@v4
         with:
-          languages: actions
-          build-mode: none
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+      - name: Build
+        if: matrix.language == 'c-cpp'
+        run: make
       - uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
