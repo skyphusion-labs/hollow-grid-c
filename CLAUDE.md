@@ -18,15 +18,16 @@ Reference implementation:
 [the-hollow-grid](https://github.com/skyphusion-labs/the-hollow-grid) (TypeScript on
 Cloudflare Workers + Durable Objects).
 
-This is a **complementary fleet world node**, not a Workers/DO port. It speaks the
+This is a world node, not a Workers/DO port. It speaks the
 same language-agnostic wire protocol and joins the Grid Hub when `GRID_HUB_URL` is set.
 
 **Protocol authority:** `the-hollow-grid/docs/protocol.md`. **Definition of done =
 upstream `smoke.mjs`** (score against current the-hollow-grid head); two consecutive
 stateful RemoteHub runs pass.
 
-**Status:** **Ferrite live** on the Grid when healthy. See `docs/PLAN.md` and
-`docs/WORLD.md`.
+**Status:** not deployed. `.github/workflows/release.yml` pushes the image to GHCR
+on a `v*` tag only and has no host deploy step (the Hetzner fleet was
+decommissioned 2026-09-24). See `docs/PLAN.md` and `docs/WORLD.md` for the world.
 
 ## The Grid federation
 
@@ -48,12 +49,13 @@ stateful RemoteHub runs pass.
 
 ```bash
 make                 # build ./build/hollow-grid-c
+make check           # that binary, plus make test (./build/test-core) and --help
 make clean
 ./build/hollow-grid-c --help
+./build/hollow-grid-c --addr 127.0.0.1:8792   # default LISTEN_ADDR is 0.0.0.0:8792; /ws
 ```
 
-When `/ws` exists: run the binary, then score with upstream smoke from a
-the-hollow-grid checkout:
+Score with upstream smoke from a the-hollow-grid checkout:
 
 ```bash
 ADMIN_TOKEN=$(openssl rand -hex 16) \
@@ -74,11 +76,17 @@ ADMIN_TOKEN=$(openssl rand -hex 16) \
 ## Repo layout (current)
 
 ```
-src/main.c           entry + full world server
-include/             public headers (landed (transport, world, grid, store))
-docs/PLAN.md         phase plan
-docs/WORLD.md        world identity
-Makefile             build
+src/main.c              entry (flags, listen). Default port 8792.
+src/transport/server.c  /ws and HTTP
+src/world/              world and items
+src/grid/remote.c       RemoteHub client
+src/store/store.c       SQLite character store
+src/event/event.c       @event framing
+include/                hg_event.h, hg_grid.h, hg_items.h, hg_server.h, hg_store.h, hg_world.h
+docs/PLAN.md            phase plan
+docs/WORLD.md           world identity
+Makefile                build, test, check, smoke
+tests/                  test_core.c, smoke.sh
 ```
 
 ## Commits
@@ -88,6 +96,8 @@ laptop: Conrad Rockenhaus `<conrad@skyphusion.org>`.
 
 ## Release / deploy
 
-**Tag-gated production deploy.** Merges to `main` run CI only; they do not ship production.
-Cut an annotated SemVer tag on `main` to release (`git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z`).
-Deploy workflows assert the tag commit is an ancestor of `origin/main`.
+**Tag-gated GHCR publish, not a host deploy.** Merges to `main` run CI, image build,
+and blocking smoke; they do not push the image.
+Cut an annotated SemVer tag on `main` to publish (`git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z`).
+`release.yml` pushes `:<sha>` and `:latest` on that tag. It does not assert that
+the tag commit is an ancestor of `origin/main`. There is no fleet deploy step.
