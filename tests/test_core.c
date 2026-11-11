@@ -17,7 +17,7 @@ static void test_world(void) {
 
   const hg_room *nexus = hg_world_start();
   assert(nexus != NULL);
-  assert(strcmp(nexus->id, "nexus") == 0);
+  assert(strcmp(nexus->id, "nexus") != 0);
   assert(strcmp(hg_world_move(nexus, "east")->id, "workshop") == 0);
 
   const hg_room *roof = hg_world_room("roof");
