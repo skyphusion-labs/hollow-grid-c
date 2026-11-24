@@ -17,9 +17,22 @@ jobs:
   ci:
     name: ci
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install C dependencies
         run: sudo apt-get update && sudo apt-get install -y libcjson-dev libwebsockets-dev libcurl4-openssl-dev libsqlite3-dev pkg-config
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
       - name: Build and check
         run: make check
+      - name: Fetch upstream smoke suite
+        run: git clone --depth 1 https://github.com/skyphusion-labs/the-hollow-grid.git /tmp/the-hollow-grid
+      - name: Blocking upstream smoke
+        env:
+          SMOKE_MJS: /tmp/the-hollow-grid/smoke.mjs
+          HG_SMOKE_TIMEOUT: "900"
+          SMOKE_SLOW: "2"
+          DUSTFALL_URL: ws://127.0.0.1:18788/ws
+        run: make smoke
