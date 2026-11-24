@@ -58,19 +58,19 @@ export class FerriteWorld extends DurableObject {
     if (!this.env.GRID_HUB_TOKEN) {
       return new Response("GRID_HUB_TOKEN is not set.\n", { status: 503 });
     }
-    const env = {
+    if (!this.env.GRID_WORLD_KEY) {
+      return new Response("GRID_WORLD_KEY is not set.\n", { status: 503 });
+    }
+    return {
       LISTEN_ADDR: "0.0.0.0:8792",
       DATA_DIR: "/data",
       WORLD_NAME: "Ferrite Wastes",
       WORLD_URL: "wss://ferrite.skyphusion.org/ws",
       GRID_HUB_URL: "https://grid-hub.skyphusion.org/rpc",
       GRID_HUB_TOKEN: this.env.GRID_HUB_TOKEN,
+      GRID_WORLD_KEY: this.env.GRID_WORLD_KEY,
       ADMIN_TOKEN: this.env.ADMIN_TOKEN,
     };
-    if (this.env.GRID_WORLD_KEY) {
-      env.GRID_WORLD_KEY = this.env.GRID_WORLD_KEY;
-    }
-    return env;
   }
 
   async armSnapshot() {

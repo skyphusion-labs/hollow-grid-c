@@ -132,6 +132,20 @@ static int header_value_ok(const char *value) {
   return 1;
 }
 
+static int hub_write_method(const char *method) {
+  return strcmp(method, "commitCharacter") == 0 ||
+         strcmp(method, "reportPresence") == 0 ||
+         strcmp(method, "register") == 0 ||
+         strcmp(method, "claimCharacterLease") == 0 ||
+         strcmp(method, "releaseCharacterLease") == 0 ||
+         strcmp(method, "record") == 0 ||
+         strcmp(method, "shiftTide") == 0 ||
+         strcmp(method, "gridcast") == 0 ||
+         strcmp(method, "recordFallen") == 0 ||
+         strcmp(method, "recordRescued") == 0 ||
+         strcmp(method, "pruneLedgerKinds") == 0;
+}
+
 /* 0 = ok (result may be NULL for JSON null). -1 = transport/RPC failure. */
 static int rpc_call(hg_grid *grid, const char *method, cJSON *params,
                     cJSON **out_result) {
@@ -139,6 +153,11 @@ static int rpc_call(hg_grid *grid, const char *method, cJSON *params,
     *out_result = NULL;
   }
   if (grid == NULL || method == NULL) {
+    cJSON_Delete(params);
+    return -1;
+  }
+  if (hub_write_method(method) &&
+      (!header_value_ok(grid->world) || !header_value_ok(grid->world_key))) {
     cJSON_Delete(params);
     return -1;
   }
@@ -290,7 +309,7 @@ int hg_grid_claim_lease(hg_grid *grid, const char *name) {
     return -1;
   }
   if (grid->world_key == NULL || grid->world_key[0] == '\0') {
-    return 0;
+    return -1;
   }
   cJSON *params = cJSON_CreateArray();
   cJSON_AddItemToArray(params, cJSON_CreateString(name != NULL ? name : ""));
