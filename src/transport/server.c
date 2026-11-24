@@ -38,6 +38,7 @@
 
 typedef enum {
   HG_WAIT_NAME,
+  HG_WAIT_TOKEN,
   HG_WAIT_RACE,
   HG_WAIT_HUB,
   HG_PLAYING,
@@ -221,6 +222,7 @@ typedef struct hg_session {
   char reply_to[33];
   int market_resolved;
   int hub_login_resumed;
+  int keeper_loaded;
   time_t trait_ready_at;
   time_t treat_ready_at;
   hg_message *out_head;
@@ -304,6 +306,8 @@ static void merge_hub_on_login(hg_server *server, hg_character *character);
 static void commit_hub(hg_server *server, const hg_character *character);
 static void finish_login_playing(hg_session *session, hg_server *server,
                                  int resumed);
+static void send_vitals(hg_session *session);
+static void send_affects(hg_session *session);
 
 static void free_messages(hg_session *session) {
   while (session->out_head != NULL) {
@@ -780,6 +784,11 @@ static int federation_worker_start(hg_server *server) {
     pthread_mutex_destroy(&worker->mutex);
     return -1;
   }
+  {
+    const char *world_key = getenv("GRID_WORLD_KEY");
+    hg_grid_set_identity(worker->grid, server->config->world_name,
+                         world_key != NULL ? world_key : "");
+  }
   worker->config = server->config;
   worker->cast_cursor = server->last_cast_id;
   if (pthread_create(&worker->thread, NULL, federation_worker_main, worker) !=
@@ -1044,7 +1053,7 @@ static void drain_char_load_results(hg_server *server) {
   for (size_t i = 0; i < count; ++i) {
     hg_session *session = NULL;
     for (hg_session *s = server->sessions; s != NULL; s = s->next) {
-      if (s->state == HG_WAIT_HUB &&
+      if ((s->state == HG_WAIT_HUB || s->state == HG_PLAYING) &&
           strcasecmp(s->character.name, results[i].name) == 0) {
         session = s;
         break;
@@ -1056,7 +1065,12 @@ static void drain_char_load_results(hg_server *server) {
     if (results[i].ok && results[i].found) {
       apply_hub_sheet(&session->character, &results[i].sheet);
     }
-    finish_login_playing(session, server, results[i].resumed);
+    if (session->state == HG_WAIT_HUB) {
+      finish_login_playing(session, server, results[i].resumed);
+    } else if (results[i].ok && results[i].found) {
+      send_vitals(session);
+      send_affects(session);
+    }
   }
 }
 
@@ -1801,15 +1815,12 @@ static void finish_login(hg_session *session, hg_server *server, int resumed) {
     snprintf(session->character.position, sizeof(session->character.position),
              "standing");
   }
+  finish_login_playing(session, server, resumed);
   if (server->remote != NULL && server->federation.started) {
-    session->state = HG_WAIT_HUB;
-    session->hub_login_resumed = resumed;
-    session_register(server, session);
     queue_char_load(server, session->character.name, resumed);
     return;
   }
   merge_hub_on_login(server, &session->character);
-  finish_login_playing(session, server, resumed);
 }
 
 static char *trim(char *text) {
@@ -1824,6 +1835,45 @@ static char *trim(char *text) {
   return text;
 }
 
+static int keeper_token_matches(const char *token) {
+  const char *expected = getenv("ADMIN_TOKEN");
+  if (expected == NULL || expected[0] == '\0' || token == NULL || token[0] == '\0') {
+    return 0;
+  }
+  size_t left = strlen(token);
+  size_t right = strlen(expected);
+  if (left != right) {
+    return 0;
+  }
+  unsigned char diff = 0;
+  for (size_t i = 0; i < left; i++) {
+    diff |= (unsigned char)token[i] ^ (unsigned char)expected[i];
+  }
+  return diff == 0;
+}
+
+static void refuse_keeper_token(hg_session *session) {
+  memset(&session->character, 0, sizeof(session->character));
+  session->keeper_loaded = 0;
+  session->state = HG_WAIT_NAME;
+  queue_text(session, "That token is refused.");
+  queue_text(session, "By what name are you known, wanderer?");
+}
+
+static void handle_keeper_token(hg_session *session, hg_server *server,
+                                const char *input) {
+  if (!keeper_token_matches(input)) {
+    refuse_keeper_token(session);
+    return;
+  }
+  if (session->keeper_loaded) {
+    finish_login(session, server, 1);
+    return;
+  }
+  session->state = HG_WAIT_RACE;
+  send_creation_menu(session);
+}
+
 static void handle_name(hg_session *session, hg_server *server,
                         const char *input) {
   if (!hg_store_valid_name(input)) {
@@ -1835,6 +1885,15 @@ static void handle_name(hg_session *session, hg_server *server,
   int loaded = hg_store_load(&server->store, input, &session->character);
   if (loaded < 0) {
     queue_text(session, "The local record is damaged. Try another name.");
+    return;
+  }
+  if (is_admin(server, input)) {
+    if (loaded == 0) {
+      hg_character_new(&session->character, input);
+    }
+    session->keeper_loaded = loaded == 1;
+    session->state = HG_WAIT_TOKEN;
+    queue_text(session, "The Grid remembers keepers. Speak the keeper's token:");
     return;
   }
   if (loaded == 1) {
@@ -4669,6 +4728,9 @@ static void handle_command(hg_session *session, hg_server *server,
   case HG_WAIT_NAME:
     handle_name(session, server, command);
     break;
+  case HG_WAIT_TOKEN:
+    handle_keeper_token(session, server, command);
+    break;
   case HG_WAIT_RACE:
     handle_race(session, server, command);
     break;
@@ -4867,6 +4929,11 @@ int hg_server_run(const hg_server_config *config) {
   }
   parse_admins(&server, config->admins);
   server.remote = hg_grid_open(config->grid_hub_url, config->grid_hub_token);
+  if (server.remote != NULL) {
+    const char *world_key = getenv("GRID_WORLD_KEY");
+    hg_grid_set_identity(server.remote, config->world_name,
+                         world_key != NULL ? world_key : "");
+  }
   hg_world_init(&server.world);
   seed_traces(&server);
   seed_worlds(&server);

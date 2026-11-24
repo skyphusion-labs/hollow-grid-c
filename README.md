@@ -30,6 +30,18 @@ Sibling ports (same contract, different runtimes):
   See `docs/PLAN.md`.
 - **License:** AGPL-3.0-only (same as the other ports). See `LICENSE` + `NOTICE`.
 
+## Cloudflare
+
+One Durable Object runs the existing container.
+The object starts the image, forwards `/ws`, and stores a filesystem snapshot.
+The container reaches `https://grid-hub.skyphusion.org/rpc`.
+A keeper name must speak `ADMIN_TOKEN` before login.
+`ADMIN_TOKEN`, `GRID_HUB_TOKEN`, and `GRID_WORLD_KEY` are Worker secrets.
+Hub writes need `GRID_WORLD_KEY`.
+The hub map must include this world name.
+The container sleeps when it is idle.
+This path is deployed at `wss://ferrite.skyphusion.org/ws`.
+
 ## Quick start
 
 ```sh

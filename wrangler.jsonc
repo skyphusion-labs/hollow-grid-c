@@ -1,0 +1,31 @@
+{
+  "name": "hollow-grid-c",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-11-24",
+  "routes": [{ "pattern": "ferrite.skyphusion.org", "custom_domain": true }],
+  "vars": {
+    "WORLD_NAME": "Ferrite Wastes",
+    "WORLD_URL": "wss://ferrite.skyphusion.org/ws",
+    "GRID_HUB_URL": "https://grid-hub.skyphusion.org/rpc"
+  },
+  "containers": [
+    {
+      "class_name": "FerriteWorld",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "base": {
+          "dockerfile": "./Dockerfile"
+        }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "WORLD", "class_name": "FerriteWorld" }]
+  },
+  "exports": {
+    "FerriteWorld": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
+}

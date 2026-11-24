@@ -21,7 +21,7 @@ static void usage(const char *argv0) {
           "  --help, -h           show this help\n"
           "\n"
           "Environment: LISTEN_ADDR, WORLD_NAME, WORLD_URL, DATA_DIR, ADMINS,\n"
-          "             GRID_HUB_URL, GRID_HUB_TOKEN\n"
+          "             ADMIN_TOKEN, GRID_HUB_URL, GRID_HUB_TOKEN\n"
           "Contract: the-hollow-grid/docs/protocol.md\n",
           argv0);
 }
@@ -101,6 +101,14 @@ int main(int argc, char **argv) {
 
   char host[128];
   int port = 0;
+  if (grid_hub_url[0] != '\0') {
+    const char *admin_token = getenv("ADMIN_TOKEN");
+    if (admin_token == NULL || admin_token[0] == '\0') {
+      fprintf(stderr, "FATAL: ADMIN_TOKEN must be set when GRID_HUB_URL is set\n");
+      return 2;
+    }
+  }
+
   if (parse_address(address, host, sizeof(host), &port) != 0) {
     fprintf(stderr, "invalid --addr %s (expected host:port)\n", address);
     return 2;

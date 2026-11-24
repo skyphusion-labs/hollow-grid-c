@@ -52,6 +52,9 @@ typedef struct {
 /* Returns NULL when hub_url is empty/NULL (caller stays on LocalHub). */
 hg_grid *hg_grid_open(const char *hub_url, const char *token);
 void hg_grid_close(hg_grid *grid);
+void hg_grid_set_identity(hg_grid *grid, const char *world,
+                          const char *world_key);
+int hg_grid_claim_lease(hg_grid *grid, const char *name);
 
 int hg_grid_ping(hg_grid *grid, long *latency_ms);
 
