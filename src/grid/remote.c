@@ -10,6 +10,8 @@
 struct hg_grid {
   char *url;
   char *token;
+  char *world;
+  char *world_key;
   CURL *curl;
   int curl_global_owned;
 };
@@ -102,7 +104,46 @@ void hg_grid_close(hg_grid *grid) {
   }
   free(grid->url);
   free(grid->token);
+  free(grid->world);
+  free(grid->world_key);
   free(grid);
+}
+
+void hg_grid_set_identity(hg_grid *grid, const char *world,
+                          const char *world_key) {
+  if (grid == NULL) {
+    return;
+  }
+  free(grid->world);
+  free(grid->world_key);
+  grid->world = dup_str(world != NULL ? world : "");
+  grid->world_key = dup_str(world_key != NULL ? world_key : "");
+}
+
+static int header_value_ok(const char *value) {
+  if (value == NULL || value[0] == '\0') {
+    return 0;
+  }
+  for (const char *p = value; *p != '\0'; ++p) {
+    if (*p == '\r' || *p == '\n') {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int hub_write_method(const char *method) {
+  return strcmp(method, "commitCharacter") == 0 ||
+         strcmp(method, "reportPresence") == 0 ||
+         strcmp(method, "register") == 0 ||
+         strcmp(method, "claimCharacterLease") == 0 ||
+         strcmp(method, "releaseCharacterLease") == 0 ||
+         strcmp(method, "record") == 0 ||
+         strcmp(method, "shiftTide") == 0 ||
+         strcmp(method, "gridcast") == 0 ||
+         strcmp(method, "recordFallen") == 0 ||
+         strcmp(method, "recordRescued") == 0 ||
+         strcmp(method, "pruneLedgerKinds") == 0;
 }
 
 /* 0 = ok (result may be NULL for JSON null). -1 = transport/RPC failure. */
@@ -112,6 +153,11 @@ static int rpc_call(hg_grid *grid, const char *method, cJSON *params,
     *out_result = NULL;
   }
   if (grid == NULL || method == NULL) {
+    cJSON_Delete(params);
+    return -1;
+  }
+  if (hub_write_method(method) &&
+      (!header_value_ok(grid->world) || !header_value_ok(grid->world_key))) {
     cJSON_Delete(params);
     return -1;
   }
@@ -136,9 +182,19 @@ static int rpc_call(hg_grid *grid, const char *method, cJSON *params,
   headers = curl_slist_append(headers, "Content-Type: application/json");
   headers = curl_slist_append(headers, "User-Agent: hollow-grid-c/0.1.0");
   char auth[640];
-  if (grid->token[0] != '\0') {
+  char world_hdr[160];
+  char key_hdr[256];
+  if (grid->token != NULL && grid->token[0] != '\0') {
     snprintf(auth, sizeof(auth), "Authorization: Bearer %s", grid->token);
     headers = curl_slist_append(headers, auth);
+  }
+  if (grid->world != NULL && header_value_ok(grid->world)) {
+    snprintf(world_hdr, sizeof(world_hdr), "X-Grid-World: %s", grid->world);
+    headers = curl_slist_append(headers, world_hdr);
+  }
+  if (grid->world_key != NULL && header_value_ok(grid->world_key)) {
+    snprintf(key_hdr, sizeof(key_hdr), "X-Grid-World-Key: %s", grid->world_key);
+    headers = curl_slist_append(headers, key_hdr);
   }
 
   curl_easy_reset(grid->curl);
@@ -248,8 +304,24 @@ int hg_grid_shift_tide(hg_grid *grid, int delta, int *out_tide) {
   return 0;
 }
 
+int hg_grid_claim_lease(hg_grid *grid, const char *name) {
+  if (grid == NULL || grid->world == NULL || grid->world[0] == '\0') {
+    return -1;
+  }
+  if (grid->world_key == NULL || grid->world_key[0] == '\0') {
+    return -1;
+  }
+  cJSON *params = cJSON_CreateArray();
+  cJSON_AddItemToArray(params, cJSON_CreateString(name != NULL ? name : ""));
+  cJSON_AddItemToArray(params, cJSON_CreateString(grid->world));
+  return rpc_call(grid, "claimCharacterLease", params, NULL);
+}
+
 int hg_grid_gridcast(hg_grid *grid, const char *world, const char *sender,
                      const char *text) {
+  if (hg_grid_claim_lease(grid, sender) != 0) {
+    return -1;
+  }
   cJSON *params = cJSON_CreateArray();
   cJSON_AddItemToArray(params, cJSON_CreateString(world != NULL ? world : ""));
   cJSON_AddItemToArray(params, cJSON_CreateString(sender != NULL ? sender : ""));
@@ -399,6 +471,8 @@ int hg_grid_load_character(hg_grid *grid, const char *name, hg_char_sheet *out,
   }
   cJSON *params = cJSON_CreateArray();
   cJSON_AddItemToArray(params, cJSON_CreateString(name != NULL ? name : ""));
+  cJSON_AddItemToArray(params,
+                       cJSON_CreateString(grid->world != NULL ? grid->world : ""));
   cJSON *result = NULL;
   if (rpc_call(grid, "loadCharacter", params, &result) != 0) {
     return -1;
@@ -409,8 +483,9 @@ int hg_grid_load_character(hg_grid *grid, const char *name, hg_char_sheet *out,
   }
   sheet_from_json(result, out);
   if (found != NULL) {
+    int faction_set = out->faction[0] != '\0' && strcmp(out->faction, "none") != 0;
     *found = out->race[0] != '\0' || out->level > 1 || out->xp > 0 ||
-             out->faction[0] != '\0' || out->morality != 0;
+             out->morality != 0 || faction_set;
   }
   cJSON_Delete(result);
   return 0;
@@ -418,8 +493,13 @@ int hg_grid_load_character(hg_grid *grid, const char *name, hg_char_sheet *out,
 
 int hg_grid_commit_character(hg_grid *grid, const char *name,
                              const hg_char_sheet *sheet) {
+  if (hg_grid_claim_lease(grid, name) != 0) {
+    return -1;
+  }
   cJSON *params = cJSON_CreateArray();
   cJSON_AddItemToArray(params, cJSON_CreateString(name != NULL ? name : ""));
+  cJSON_AddItemToArray(params,
+                       cJSON_CreateString(grid->world != NULL ? grid->world : ""));
   cJSON *obj = cJSON_CreateObject();
   cJSON_AddNumberToObject(obj, "level", sheet->level);
   cJSON_AddNumberToObject(obj, "xp", sheet->xp);

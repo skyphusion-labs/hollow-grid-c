@@ -3,6 +3,9 @@ data/
 .local/
 .env
 .git/
+.wrangler/
+node_modules/
+.dev.vars
 .github/
 *.o
 *.a

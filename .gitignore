@@ -14,3 +14,6 @@
 
 # Local operator secrets (hub token, etc.)
 .local/
+.dev.vars
+.wrangler/
+node_modules/
