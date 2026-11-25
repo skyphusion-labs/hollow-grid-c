@@ -469,9 +469,6 @@ int hg_grid_load_character(hg_grid *grid, const char *name, hg_char_sheet *out,
   if (found != NULL) {
     *found = 0;
   }
-  if (hg_grid_claim_lease(grid, name) != 0) {
-    return -1;
-  }
   cJSON *params = cJSON_CreateArray();
   cJSON_AddItemToArray(params, cJSON_CreateString(name != NULL ? name : ""));
   cJSON_AddItemToArray(params,
