@@ -96,6 +96,7 @@ typedef struct {
 #define HG_MAX_PENDING_FALLEN 32
 #define HG_MAX_PENDING_CASTS 32
 #define HG_MAX_PENDING_LOADS 16
+#define HG_HUB_LOGIN_TIMEOUT_USEC (5 * LWS_USEC_PER_SEC)
 #define HG_MAX_LEDGER_KINDS 32
 
 typedef struct {
@@ -306,8 +307,6 @@ static void merge_hub_on_login(hg_server *server, hg_character *character);
 static void commit_hub(hg_server *server, const hg_character *character);
 static void finish_login_playing(hg_session *session, hg_server *server,
                                  int resumed);
-static void send_vitals(hg_session *session);
-static void send_affects(hg_session *session);
 
 static void free_messages(hg_session *session) {
   while (session->out_head != NULL) {
@@ -1053,7 +1052,7 @@ static void drain_char_load_results(hg_server *server) {
   for (size_t i = 0; i < count; ++i) {
     hg_session *session = NULL;
     for (hg_session *s = server->sessions; s != NULL; s = s->next) {
-      if ((s->state == HG_WAIT_HUB || s->state == HG_PLAYING) &&
+      if (s->state == HG_WAIT_HUB &&
           strcasecmp(s->character.name, results[i].name) == 0) {
         session = s;
         break;
@@ -1065,12 +1064,7 @@ static void drain_char_load_results(hg_server *server) {
     if (results[i].ok && results[i].found) {
       apply_hub_sheet(&session->character, &results[i].sheet);
     }
-    if (session->state == HG_WAIT_HUB) {
-      finish_login_playing(session, server, results[i].resumed);
-    } else if (results[i].ok && results[i].found) {
-      send_vitals(session);
-      send_affects(session);
-    }
+    finish_login_playing(session, server, results[i].resumed);
   }
 }
 
@@ -1815,12 +1809,16 @@ static void finish_login(hg_session *session, hg_server *server, int resumed) {
     snprintf(session->character.position, sizeof(session->character.position),
              "standing");
   }
-  finish_login_playing(session, server, resumed);
   if (server->remote != NULL && server->federation.started) {
+    session->state = HG_WAIT_HUB;
+    session->hub_login_resumed = resumed;
+    session_register(server, session);
     queue_char_load(server, session->character.name, resumed);
+    lws_set_timer_usecs(session->wsi, HG_HUB_LOGIN_TIMEOUT_USEC);
     return;
   }
   merge_hub_on_login(server, &session->character);
+  finish_login_playing(session, server, resumed);
 }
 
 static char *trim(char *text) {
@@ -4869,7 +4867,9 @@ static int callback(struct lws *wsi, enum lws_callback_reasons reason,
     }
     return 0;
   case LWS_CALLBACK_TIMER:
-    if (session->state == HG_PLAYING) {
+    if (session->state == HG_WAIT_HUB) {
+      finish_login_playing(session, server, session->hub_login_resumed);
+    } else if (session->state == HG_PLAYING) {
       on_tick(session, server);
     }
     return 0;
