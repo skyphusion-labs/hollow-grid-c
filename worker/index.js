@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { playPage } from "./webclient.js";
 
 const PORT = 8792;
 const IDLE_MS = 30 * 60 * 1000;
@@ -133,6 +134,12 @@ export class FerriteWorld extends DurableObject {
 
 export default {
   fetch(request, env) {
+    const { pathname } = new URL(request.url);
+    if (request.method === "GET" && (pathname === "/" || pathname === "/play")) {
+      return new Response(playPage(env.WORLD_NAME || "Ferrite Wastes"), {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }
     // world2 is the live instance. world was left on a container that started
     // before GRID_WORLD_KEY existed.
     return env.WORLD.getByName("world2").fetch(request);

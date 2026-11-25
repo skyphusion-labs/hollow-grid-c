@@ -10,7 +10,7 @@ The reference implementation is [the-hollow-grid](https://github.com/skyphusion-
 
 Protocol authority is `the-hollow-grid/docs/protocol.md`. Do not invent a parallel protocol. Definition of done is upstream `smoke.mjs`, scored against current the-hollow-grid head. Two consecutive stateful RemoteHub runs must pass. Do not freeze an old check count. Read [docs/PLAN.md](docs/PLAN.md) and [README.md](README.md) for the last recorded score.
 
-The public host stays offline. A `v*` tag publishes the container image. The workflow has no host deploy step. See [docs/PLAN.md](docs/PLAN.md) and [docs/WORLD.md](docs/WORLD.md).
+Play at https://ferrite.skyphusion.org/ or connect to `wss://ferrite.skyphusion.org/ws`. The public world runs in a Cloudflare container. A `v*` tag publishes the image to GHCR separately. See [docs/PLAN.md](docs/PLAN.md) and [docs/WORLD.md](docs/WORLD.md).
 
 The license is AGPL-3.0-only. Keep [NOTICE](NOTICE) honest. See [LICENSE](LICENSE).
 
@@ -67,7 +67,7 @@ tests/                  test_core.c, smoke.sh
 
 Write Simplified Technical English. Use short sentences. Put one idea in each sentence. Use the active present tense. Use plain words. Use the same word every time.
 
-State the limit next to the capability. Do not turn a measured result into a promise. The public host stays offline until a host deploy exists. An image publish is not a host deploy.
+State the limit next to the capability. Do not turn a measured result into a promise. Check the public host separately from the GHCR image build and smoke run.
 
 ## Commits and version
 
@@ -81,7 +81,7 @@ Before a release pull request, look for a tag of the current version. A matching
 
 ## Release
 
-Tag-gated image publish. No host deploy.
+The release workflow publishes tagged images to GHCR. Cloudflare hosting uses `wrangler.jsonc` separately.
 
 ```bash
 git tag -a vX.Y.Z -m "vX.Y.Z"

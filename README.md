@@ -40,7 +40,10 @@ A keeper name must speak `ADMIN_TOKEN` before login.
 Hub writes need `GRID_WORLD_KEY`.
 The hub map must include this world name.
 The container sleeps when it is idle.
-This path is deployed at `wss://ferrite.skyphusion.org/ws`.
+Play in the browser at https://ferrite.skyphusion.org/ or connect to
+`wss://ferrite.skyphusion.org/ws` with a WebSocket client.
+The Worker serves the browser page and forwards the game socket to the container.
+The standalone container serves the game socket.
 
 ## Quick start
 
